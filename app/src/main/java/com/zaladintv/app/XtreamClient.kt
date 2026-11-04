@@ -59,7 +59,7 @@ class XtreamClient(private val server: String, private val user: String, private
         fun add(action: String, catAction: String, kind: String) {
             val cats = categories(catAction)
             // Streamed parse: a big catalogue is tens of MB of JSON, reading it as one String ran out of memory.
-            stream(api(action), 15000) { o ->
+            stream(api(action), 80000) { o ->
                 val id = o[if (kind == "Séries") "series_id" else "stream_id"].orEmpty()
                 if (id.isNotBlank()) {
                     val ext = o["container_extension"].orEmpty().ifBlank { "mp4" }
@@ -82,15 +82,19 @@ class XtreamClient(private val server: String, private val user: String, private
     fun loadEpisodes(seriesId: String): List<Channel> {
         require(seriesId.all { it.isDigit() }) { "Identifiant de série invalide" }
         val info = JSONObject(fetch(api("get_series_info", "&series_id=$seriesId")))
-        val episodes = info.optJSONObject("episodes") ?: return emptyList()
+        // Servers return "episodes" as an object keyed by season, or as an array of seasons: accept both so no season is lost.
+        val bySeason = LinkedHashMap<String, JSONArray>()
+        info.optJSONObject("episodes")?.let { o -> o.keys().forEach { k -> o.optJSONArray(k)?.let { bySeason[k] = it } } }
+        info.optJSONArray("episodes")?.let { a -> for (i in 0 until a.length()) a.optJSONArray(i)?.let { bySeason[(i + 1).toString()] = it } }
+        if (bySeason.isEmpty()) return emptyList()
         val output = mutableListOf<Channel>()
-        for (season in episodes.keys()) {
-            val list = episodes.optJSONArray(season) ?: continue
+        for ((season, list) in bySeason) {
             for (i in 0 until list.length()) {
                 val item = list.optJSONObject(i) ?: continue
                 val id = item.optString("id")
                 if (id.isBlank()) continue
-                val ext = item.optJSONObject("info")?.optString("container_extension", "mp4") ?: "mp4"
+                // The container is on the episode itself; some servers only put it under "info".
+                val ext = item.optString("container_extension").ifBlank { item.optJSONObject("info")?.optString("container_extension").orEmpty() }.ifBlank { "mp4" }
                 val title = item.optString("title", "Épisode ${i + 1}")
                 output.add(Channel("Saison $season • $title", "$root/series/${enc(user)}/${enc(password)}/$id.$ext", "Saison $season", type = "Épisode", season = season.toIntOrNull() ?: 0, episode = item.optInt("episode_num", i + 1)))
             }

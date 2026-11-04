@@ -19,7 +19,7 @@ private val en = mapOf(
     "Séries les mieux notées" to "Top rated shows", "Populaires" to "Popular",
     "Comédie" to "Comedy", "Drame" to "Drama", "Horreur" to "Horror", "Science-fiction" to "Sci-Fi", "Aventure" to "Adventure", "Famille" to "Family",
     "Action et aventure" to "Action & Adventure", "Mystère" to "Mystery", "Science-fiction et fantastique" to "Sci-Fi & Fantasy", "Documentaire" to "Documentary",
-    "Films favoris" to "Favorite movies", "Séries favorites" to "Favorite shows", "Reprendre le visionnage" to "Continue watching", "À la une" to "Featured",
+    "Films favoris" to "Favorite movies", "Séries favorites" to "Favorite shows", "Reprendre le visionnage" to "Continue watching", "À la une" to "Featured", "Mettre à jour" to "Update", "Mise à jour…" to "Updating…",
     "Ma liste" to "My list", "Ajouter une source" to "Add a source", "Bienvenue dans ZaladinTV" to "Welcome to ZaladinTV",
     "Films, séries et chaînes depuis tes sources autorisées" to "Movies, shows and channels from your authorized sources",
     "Chargement des épisodes…" to "Loading episodes…", "Aucun épisode disponible" to "No episodes available", "Choisis un épisode" to "Choose an episode",
