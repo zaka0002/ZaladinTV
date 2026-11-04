@@ -37,17 +37,16 @@ object Updater {
 
     /** Latest release with an APK asset, or null when none. */
     fun latest(): Release? {
-        val c = URL("https://api.github.com/repos/$REPO/releases/latest").openConnection() as HttpURLConnection
-        c.connectTimeout = 10000; c.readTimeout = 15000
-        c.setRequestProperty("Accept", "application/vnd.github+json")
-        if (c.responseCode != 200) return null
-        val j = JSONObject(c.inputStream.bufferedReader().use { it.readText() })
-        val assets = j.optJSONArray("assets") ?: return null
-        for (i in 0 until assets.length()) {
-            val a = assets.getJSONObject(i)
-            if (a.optString("name").endsWith(".apk", true)) return Release(j.optString("tag_name").removePrefix("v"), a.optString("browser_download_url"))
+        Net.get("https://api.github.com/repos/$REPO/releases/latest", 10_000, 15_000, headers = mapOf("Accept" to "application/vnd.github+json")).use { r ->
+            if (r.code != 200) return null
+            val j = JSONObject(r.body?.string().orEmpty())
+            val assets = j.optJSONArray("assets") ?: return null
+            for (i in 0 until assets.length()) {
+                val a = assets.getJSONObject(i)
+                if (a.optString("name").endsWith(".apk", true)) return Release(j.optString("tag_name").removePrefix("v"), a.optString("browser_download_url"))
+            }
+            return null
         }
-        return null
     }
 
     /** True when [remote] is a higher dotted version than [local] (e.g. 2.3.0 > 2.2.0). */
@@ -64,17 +63,19 @@ object Updater {
     fun download(context: Context, url: String, onProgress: (Int) -> Unit): File {
         val dir = File(context.cacheDir, "updates").apply { mkdirs(); listFiles()?.forEach { it.delete() } }
         val file = File(dir, "ZaladinTV.apk")
-        val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = 15000; c.readTimeout = 30000
-        val total = c.contentLength.toLong()
-        c.inputStream.use { input -> file.outputStream().use { out ->
-            val buf = ByteArray(64 * 1024); var done = 0L; var last = -1
-            while (true) {
-                val n = input.read(buf); if (n < 0) break
-                out.write(buf, 0, n); done += n
-                if (total > 0) { val p = (done * 100 / total).toInt(); if (p != last) { last = p; onProgress(p) } }
-            }
-        } }
+        Net.get(url, 15_000, 30_000).use { r ->
+            require(r.isSuccessful) { "HTTP ${r.code}" }
+            val body = r.body ?: error("empty")
+            val total = body.contentLength()
+            body.byteStream().use { input -> file.outputStream().use { out ->
+                val buf = ByteArray(64 * 1024); var done = 0L; var last = -1
+                while (true) {
+                    val n = input.read(buf); if (n < 0) break
+                    out.write(buf, 0, n); done += n
+                    if (total > 0) { val p = (done * 100 / total).toInt(); if (p != last) { last = p; onProgress(p) } }
+                }
+            } }
+        }
         return file
     }
 

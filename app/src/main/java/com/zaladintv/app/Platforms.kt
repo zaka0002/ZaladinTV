@@ -133,7 +133,7 @@ fun PlatformsPage(modifier: Modifier, favs: List<TmdbItem>, onFav: (TmdbItem) ->
                     Spacer(Modifier.height(12.dp))
                 if (more != null) {
                     androidx.compose.runtime.key(sortIdx, genreIdx) {
-                        PlatformGrid(Modifier.fillMaxSize(), sel, more == true, favs, onFav, if (opened != null) 4 else 6, sortIdx, genreIdx) { opened = it }
+                        PlatformGrid(Modifier.fillMaxSize(), sel.name, "with_watch_providers=${sel.id}&watch_region=FR", more == true, favs, onFav, if (opened != null) 4 else 6, sortIdx, genreIdx) { opened = it }
                     }
                 } else {
                     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
@@ -152,7 +152,7 @@ fun PlatformsPage(modifier: Modifier, favs: List<TmdbItem>, onFav: (TmdbItem) ->
 /** Full list of a platform's movies or shows as a poster grid, loading more pages while scrolling. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PlatformGrid(modifier: Modifier, p: TmdbProvider, series: Boolean, favs: List<TmdbItem>, onFav: (TmdbItem) -> Unit,
+fun PlatformGrid(modifier: Modifier, title: String, baseQuery: String, series: Boolean, favs: List<TmdbItem>, onFav: (TmdbItem) -> Unit,
                          columns: Int, sortIdx: Int, genreIdx: Int, onOpen: (TmdbItem) -> Unit) {
     var items by remember { mutableStateOf<List<TmdbItem>>(emptyList()) }
     var page by remember { mutableStateOf(1) }
@@ -162,14 +162,14 @@ private fun PlatformGrid(modifier: Modifier, p: TmdbProvider, series: Boolean, f
         loading = true
         try {
             val kind = if (series) "tv" else "movie"
-            val res = withContext(Dispatchers.IO) { TmdbClient.list("discover/$kind?with_watch_providers=${p.id}&watch_region=FR&${exSortQuery(series, sortIdx)}${exGenreQuery(series, genreIdx)}&page=$page") }
+            val res = withContext(Dispatchers.IO) { TmdbClient.list("discover/$kind?$baseQuery&${exSortQuery(series, sortIdx)}${exGenreQuery(series, genreIdx)}&page=$page") }
             items = (items + res).distinctBy { it.id }
             status = ""
         } catch (e: Exception) { status = "Catalogue : ${e.localizedMessage}" }
         loading = false
     }
     Column(modifier) {
-        Text(uiLabel(if (series) "Séries" else "Films") + " · " + p.name, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text(uiLabel(if (series) "Séries" else "Films") + " · " + title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         if (items.isEmpty()) Text(uiLabel(if (status.isNotBlank()) status else "Chargement du catalogue…"), color = Color(0xFF9DA8BF))
         LazyVerticalGrid(GridCells.Fixed(columns), modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 14.dp, bottom = 16.dp, start = 8.dp, end = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {

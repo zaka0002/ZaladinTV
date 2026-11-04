@@ -48,7 +48,7 @@ import kotlin.concurrent.thread
  * (playlist link or Xtream login) so nobody has to type on the TV remote. Only reachable on the home Wi-Fi,
  * and only through the random token that is in the QR code.
  */
-class PhoneSetupServer(private val onXtream: (String, String, String, String) -> Unit) {
+class PhoneSetupServer(private val onXtream: ((String, String, String, String) -> Unit)? = null, private val onVpn: ((String) -> Unit)? = null) {
     private val alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
     private val rnd = SecureRandom()
     val token = (1..8).map { alphabet[rnd.nextInt(alphabet.length)] }.joinToString("")
@@ -85,16 +85,20 @@ class PhoneSetupServer(private val onXtream: (String, String, String, String) ->
         while (true) { val h = line(); if (h.isEmpty()) break; if (h.startsWith("content-length:", true)) length = h.substringAfter(':').trim().toIntOrNull() ?: 0 }
         val out = sock.getOutputStream()
         if (request[1].substringBefore('?') != "/$token") { reply(out, 404, "<p>404</p>"); return@use }
-        if (request[0] == "POST" && length in 1..4096) {
+        if (request[0] == "POST" && length in 1..65536) {
             val body = ByteArray(length).also { var n = 0; while (n < length) { val r = input.read(it, n, length - n); if (r < 0) break; n += r } }
             val f = String(body, Charsets.UTF_8).split('&').mapNotNull {
                 val p = it.split('=', limit = 2); if (p.size == 2) URLDecoder.decode(p[0], "UTF-8") to URLDecoder.decode(p[1], "UTF-8").trim() else null
             }.toMap()
+            val wg = f["wg"].orEmpty()
             val srv = f["server"].orEmpty()
-            if ((srv.startsWith("https://") || srv.startsWith("http://")) && !f["user"].isNullOrBlank() && !f["pass"].isNullOrBlank()) {
+            if (wg.isNotBlank() && onVpn != null) {
+                main.post { onVpn(wg) }
+                reply(out, 200, page(uiLabel("C'est envoyé à la TV. Tu peux fermer cette page.")))
+            } else if (onXtream != null && (srv.startsWith("https://") || srv.startsWith("http://")) && !f["user"].isNullOrBlank() && !f["pass"].isNullOrBlank()) {
                 main.post { onXtream(f["name"].orEmpty(), srv, f["user"].orEmpty(), f["pass"].orEmpty()) }
                 reply(out, 200, page(uiLabel("C'est envoyé à la TV. Tu peux fermer cette page ou en ajouter une autre.")))
-            } else reply(out, 400, page(uiLabel("Lien invalide : il doit commencer par http:// ou https://")))
+            } else reply(out, 400, page(uiLabel(if (onVpn != null) "Rien reçu : colle le contenu du fichier WireGuard." else "Lien invalide : il doit commencer par http:// ou https://")))
         } else reply(out, 200, page(""))
     }
 
@@ -106,12 +110,14 @@ class PhoneSetupServer(private val onXtream: (String, String, String, String) ->
 
     private fun page(message: String): String = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ZaladinTV</title><style>body{font-family:sans-serif;background:#0b1020;color:#fff;margin:0;padding:20px;max-width:520px}
-h1{font-size:22px}h2{font-size:16px;margin-top:28px;color:#c8b6ff}input{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border-radius:10px;border:1px solid #33405f;background:#141b2a;color:#fff;font-size:16px}
+h1{font-size:22px}h2{font-size:16px;margin-top:28px;color:#c8b6ff}textarea{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border-radius:10px;border:1px solid #33405f;background:#141b2a;color:#fff;font-size:14px;font-family:monospace}input{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border-radius:10px;border:1px solid #33405f;background:#141b2a;color:#fff;font-size:16px}
 button{width:100%;padding:14px;margin-top:8px;border:0;border-radius:10px;background:#8f6bff;color:#fff;font-size:16px;font-weight:bold}.m{background:#1b3a2a;padding:12px;border-radius:10px}</style></head><body>
 <h1>ZaladinTV</h1>${if (message.isNotBlank()) "<p class=m>$message</p>" else ""}
-<h2>${uiLabel("Ajouter une source Xtream")}</h2>
+${if (onXtream != null) """<h2>${uiLabel("Ajouter une source Xtream")}</h2>
 <form method="post"><input name="name" placeholder="${uiLabel("Nom (facultatif)")}"><input name="server" type="url" placeholder="http://monserveur.example:8080"><input name="user" placeholder="${uiLabel("Identifiant")}" autocapitalize="none">
-<input name="pass" type="password" placeholder="${uiLabel("Mot de passe")}"><button>${uiLabel("Envoyer à la TV")}</button></form>
+<input name="pass" type="password" placeholder="${uiLabel("Mot de passe")}"><button>${uiLabel("Envoyer à la TV")}</button></form>""" else ""}
+${if (onVpn != null) """<h2>${uiLabel("Clé WireGuard (VPN)")}</h2>
+<form method="post"><textarea name="wg" rows="12" placeholder="[Interface]&#10;PrivateKey = ...&#10;[Peer]&#10;..."></textarea><button>${uiLabel("Envoyer à la TV")}</button></form>""" else ""}
 </body></html>"""
 
     companion object {
@@ -134,44 +140,27 @@ fun QrCode(text: String, size: Dp) {
     }
 }
 
-/** Settings block: shows a QR code so a playlist can be entered from a phone instead of the TV remote. */
+/** Settings card: the QR code is shown right away (the local server runs while the card is on screen). */
 @Composable
-fun PhoneSetupCard(addAccount: (String, String, String, String, (String) -> Unit) -> Unit) {
-    var shown by remember { mutableStateOf(false) }
+fun PhoneSetupCard(hint: String, build: ((String) -> Unit) -> PhoneSetupServer) {
     var status by remember { mutableStateOf("") }
     var link by remember { mutableStateOf("") }
-    val doAdd by rememberUpdatedState(addAccount)
-    val server = remember(shown) {
-        if (!shown) null else PhoneSetupServer(
-            onXtream = { n, s, u, pw -> status = uiLabel("Reçu, chargement…"); doAdd(n, s, u, pw) { r -> status = r } })
-    }
+    val buildNow by rememberUpdatedState(build)
+    val server = remember { buildNow { status = it } }
     DisposableEffect(server) {
-        link = ""
-        if (server != null) {
-            val ip = PhoneSetupServer.localIp()
-            if (ip == null || !server.start()) status = uiLabel("Pas de réseau local détecté. Connecte la TV au Wi-Fi.")
-            else link = "http://$ip:${server.port}/${server.token}"
-        }
-        onDispose { server?.stop() }
+        val ip = PhoneSetupServer.localIp()
+        if (ip == null || !server.start()) status = uiLabel("Pas de réseau local détecté. Connecte la TV au Wi-Fi.")
+        else link = "http://$ip:${server.port}/${server.token}"
+        onDispose { server.stop() }
     }
-    Text(uiLabel("Ajouter depuis ton téléphone"), color = Color.White, fontSize = 19.sp)
-    Spacer(Modifier.height(6.dp))
-    Text(uiLabel("Scanne le QR code avec ton téléphone (même Wi-Fi) et saisis ta source Xtream sur le téléphone au lieu de la télécommande."), color = Color(0xFF9DA8BF), fontSize = 13.sp)
-    Spacer(Modifier.height(10.dp))
-    Button(onClick = { shown = !shown; status = "" }) { Text(uiLabel(if (shown) "Masquer le QR code" else "Afficher le QR code")) }
-    if (shown && link.isNotBlank()) {
-        Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            QrCode(link, 190.dp)
-            Column {
-                Text(uiLabel("Ou ouvre cette adresse sur le téléphone :"), color = Color(0xFF9DA8BF), fontSize = 13.sp)
-                Spacer(Modifier.height(6.dp))
-                Text(link, color = Color.White, fontSize = 16.sp)
-                Spacer(Modifier.height(10.dp))
-                Text(uiLabel("Le code change à chaque affichage et ne marche que sur ton réseau local."), color = Color(0xFF9DA8BF), fontSize = 12.sp)
-            }
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+        if (link.isNotBlank()) {
+            QrCode(link, 128.dp)
+            Spacer(Modifier.height(8.dp))
+            Text(uiLabel(hint), color = Color.White, fontSize = 12.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(link, color = Color(0xFFC8B6FF), fontSize = 11.sp)
         }
+        if (status.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(uiLabel(status), color = Color(0xFFC8B6FF), fontSize = 13.sp) }
     }
-    if (status.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(uiLabel(status), color = Color(0xFFC8B6FF)) }
-    Spacer(Modifier.height(22.dp))
 }

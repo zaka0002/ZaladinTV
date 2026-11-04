@@ -73,26 +73,40 @@ private val muted = Color(0xFF9DA8BF)
 
 data class Channel(val name: String, val url: String, val group: String, val logo: String = "", val type: String = "", val seriesId: String = "", val season: Int = 0, val episode: Int = 0, val show: String = "", val src: String = "")
 
-data class XtAccount(val id: String, val name: String, val server: String, val user: String, val pass: String)
+data class XtAccount(val id: String, val name: String, val server: String, val user: String, val pass: String, val frOnly: Boolean = true)
+
+private val frenchMarker = Regex("(?i)(^|[^a-z])(fr|vf|vff|vfq|vostfr|truefrench|french|france|francais|français)([^a-z]|$)")
+private fun isFrench(text: String) = frenchMarker.containsMatchIn(text)
 
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("zaladintv", MODE_PRIVATE) }
+    private val appScope = kotlinx.coroutines.MainScope()
+    private val vpn by lazy { Vpn(applicationContext, ProtonServers(applicationContext, Net.client)) }
+    private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        if (r.resultCode == RESULT_OK) appScope.launch { vpn.connect() }
+    }
+    /** Asks Android for the VPN permission when needed (a system dialog), then brings the tunnel up. */
+    private fun startVpn() {
+        val intent = vpn.permissionIntent()
+        if (intent != null) vpnConsent.launch(intent) else appScope.launch { vpn.connect() }
+    }
     private val accounts = mutableStateListOf<XtAccount>()
     private val catalogs = mutableMapOf<String, List<Channel>>()
     private val sessions = mutableStateMapOf<String, XtreamClient>()
     private val statuses = mutableStateMapOf<String, String>()
     private val channels = mutableStateListOf<Channel>()
+    private val arabic = mutableStateListOf<Channel>()
     private var message by mutableStateOf("Ajoute une source Xtream pour commencer")
 
     private fun saveAccounts() {
         val arr = org.json.JSONArray()
-        accounts.forEach { arr.put(org.json.JSONObject().put("id", it.id).put("name", it.name).put("server", it.server).put("user", it.user).put("pass", it.pass)) }
+        accounts.forEach { arr.put(org.json.JSONObject().put("id", it.id).put("name", it.name).put("server", it.server).put("user", it.user).put("pass", it.pass).put("fr", it.frOnly)) }
         prefs.edit().putString("xt_accounts", arr.toString()).apply()
     }
     private fun loadAccounts() {
         try {
             val arr = org.json.JSONArray(prefs.getString("xt_accounts", "[]"))
-            for (i in 0 until arr.length()) arr.getJSONObject(i).let { accounts.add(XtAccount(it.getString("id"), it.getString("name"), it.getString("server"), it.getString("user"), it.getString("pass"))) }
+            for (i in 0 until arr.length()) arr.getJSONObject(i).let { accounts.add(XtAccount(it.getString("id"), it.getString("name"), it.getString("server"), it.getString("user"), it.getString("pass"), it.optBoolean("fr", true))) }
         } catch (e: Exception) { }
         // Older versions kept a single Xtream account in three keys.
         val xs = prefs.getString("xt_server", null); val xu = prefs.getString("xt_user", null); val xp = prefs.getString("xt_pass", null)
@@ -104,8 +118,10 @@ class MainActivity : ComponentActivity() {
     }
     private fun hostOf(server: String) = try { Uri.parse(server).host ?: server } catch (e: Exception) { server }
     private fun rebuild() {
-        val merged = accounts.flatMap { catalogs[it.id].orEmpty() }.distinctBy { "${it.type}|${it.name.lowercase()}" }
+        val merged = accounts.flatMap { a -> catalogs[a.id].orEmpty().filter { !a.frOnly || isFrench(it.group) || isFrench(it.name) } }.distinctBy { "${it.type}|${it.name.lowercase()}" }
         channels.clear(); channels.addAll(merged)
+        // Arabic content ignores the French-only switch so the "Arabe" tab always shows what the sources hold.
+        arabic.clear(); arabic.addAll(accounts.flatMap { catalogs[it.id].orEmpty() }.filter { isArabicChannel(it) }.distinctBy { "${it.type}|${it.name.lowercase()}" })
         message = if (accounts.isEmpty()) "Ajoute une source Xtream pour commencer" else "${merged.size} films et séries"
     }
     private fun loadAccount(a: XtAccount, onDone: (Boolean, String) -> Unit) {
@@ -115,8 +131,9 @@ class MainActivity : ComponentActivity() {
                 val client = XtreamClient(a.server, a.user, a.pass, a.id)
                 val items = client.loadCatalog()
                 runOnUiThread { catalogs[a.id] = items; sessions[a.id] = client; statuses[a.id] = "${items.size} contenus"; rebuild(); onDone(true, "${a.name} : ${items.size} contenus chargés") }
-            } catch (e: Exception) {
-                runOnUiThread { statuses[a.id] = "Erreur : ${e.localizedMessage}"; onDone(false, "Connexion impossible : ${e.localizedMessage}") }
+            } catch (e: Throwable) {
+                val why = if (e is OutOfMemoryError) "catalogue trop gros pour la mémoire de la TV" else e.localizedMessage
+                runOnUiThread { statuses[a.id] = "Erreur : $why"; onDone(false, "Connexion impossible : $why") }
             }
         }.start()
     }
@@ -130,6 +147,10 @@ class MainActivity : ComponentActivity() {
             onDone(msg)
         }
     }
+    private fun toggleFrench(id: String) {
+        val i = accounts.indexOfFirst { it.id == id }
+        if (i >= 0) { accounts[i] = accounts[i].copy(frOnly = !accounts[i].frOnly); saveAccounts(); rebuild() }
+    }
     private fun removeAccount(id: String) {
         accounts.removeAll { it.id == id }; catalogs.remove(id); sessions.remove(id); statuses.remove(id)
         saveAccounts(); rebuild()
@@ -141,15 +162,21 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Lang.code = prefs.getString("lang", "fr") ?: "fr"
+        Net.dns = prefs.getString("dns", DnsChoice.SYSTEM) ?: DnsChoice.SYSTEM
+        // Images (Coil) and video (Media3) share the app's HTTP client, so DNS and VPN apply to them too.
+        coil.Coil.setImageLoader(coil.ImageLoader.Builder(applicationContext).okHttpClient(Net.client).build())
+        appScope.launch { vpn.startIfEnabled() }
         loadAccounts()
-        accounts.toList().forEach { loadAccount(it) { _, _ -> } }
-        setContent { NovaScreen(channels, message, accounts, statuses, sessions, { n, s, u, p, done -> addAccount(n, s, u, p, done) }, { removeAccount(it) }, { forgetAll() }) }
+        // One account at a time: two big catalogues downloaded together doubled the memory use.
+        fun loadNext(rest: List<XtAccount>) { if (rest.isNotEmpty()) loadAccount(rest.first()) { _, _ -> loadNext(rest.drop(1)) } }
+        loadNext(accounts.toList())
+        setContent { NovaScreen(vpn, { startVpn() }, appScope, channels, arabic, message, accounts, statuses, sessions, { n, s, u, p, done -> addAccount(n, s, u, p, done) }, { removeAccount(it) }, { toggleFrench(it) }, { forgetAll() }) }
     }
 }
 
 @Composable
-private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<XtAccount>, statuses: Map<String, String>, xtreams: Map<String, XtreamClient>,
-                       addAccount: (String, String, String, String, (String) -> Unit) -> Unit, removeAccount: (String) -> Unit, forgetSource: () -> Unit) {
+private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.coroutines.CoroutineScope, channels: List<Channel>, arabic: List<Channel>, message: String, accounts: List<XtAccount>, statuses: Map<String, String>, xtreams: Map<String, XtreamClient>,
+                       addAccount: (String, String, String, String, (String) -> Unit) -> Unit, removeAccount: (String) -> Unit, toggleFr: (String) -> Unit, forgetSource: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("zaladintv", Activity.MODE_PRIVATE) }
     val favorites = remember { mutableStateListOf<String>().apply { addAll(prefs.getStringSet("favorites", emptySet()) ?: emptySet()) } }
@@ -157,6 +184,9 @@ private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<
     var featuredIndex by remember { mutableIntStateOf(0) }
     var search by remember { mutableStateOf("") }
     var accName by remember { mutableStateOf("") }
+    var dnsChoice by remember { mutableStateOf(prefs.getString("dns", DnsChoice.SYSTEM) ?: DnsChoice.SYSTEM) }
+    var arabicTab by remember { mutableStateOf(prefs.getBoolean("arabic_tab", false)) }
+    LaunchedEffect(arabicTab) { if (!arabicTab && page == "Arabe") page = "Accueil" }
     var remoteStatus by remember { mutableStateOf("") }
     var server by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
@@ -191,6 +221,8 @@ private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<
     var episodes by remember { mutableStateOf<List<Channel>>(emptyList()) }
     var episodeStatus by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
+    val homeScroll = rememberScrollState()
+    LaunchedEffect(page) { homeScroll.scrollTo(0) }
     fun kind(ch: Channel): String = when {
         ch.type.isNotBlank() -> ch.type
         listOf("series", "séries", "tv shows", "episodes").any { ch.group.contains(it, true) } -> "Séries"
@@ -334,7 +366,7 @@ private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<
                 )
             }
             Column(Modifier.fillMaxSize().background(bg)) {
-                Row(Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color(0xFF101626), bg))).padding(horizontal = 24.dp, vertical = 8.dp),
+                Row(Modifier.fillMaxWidth().onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.background(Brush.verticalGradient(listOf(Color(0xFF101626), bg))).padding(horizontal = 24.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                     Image(painterResource(R.drawable.zaladin_logo), null, Modifier.height(34.dp).padding(end = 8.dp))
                     Text(uiLabel("ZALADIN"), fontSize = 19.sp, fontWeight = FontWeight.Black, color = Color.White)
@@ -345,20 +377,27 @@ private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<
                         Pair("Films", Icons.Default.Movie),
                         Pair("Séries", Icons.Default.VideoLibrary),
                         Pair("Plateformes", Icons.Default.Apps),
+                        Pair("Arabe", Icons.Default.Language),
                         Pair("Favoris", Icons.Default.Favorite),
                         Pair("Recherche", Icons.Default.Search),
                         Pair("Réglages", Icons.Default.Settings),
                         Pair("Quitter", Icons.Default.Close)
-                    ).forEach { (name, icon) ->
+                    ).filter { it.first != "Arabe" || arabicTab }.forEach { (name, icon) ->
                         NavigationItem(name, icon, page == name) {
                             if (name == "Quitter") (context as? android.app.Activity)?.finishAffinity() else page = name
                         }
                     }
                 }
                 if (page == "Films" || page == "Séries") androidx.compose.runtime.key(page) { ExplorePage(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), page == "Séries", favTmdb, toggleFavTmdb, watchDiscover, trailerDiscover) }
+                else if (page == "Arabe" && arabicTab) ArabicPage(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), favTmdb, toggleFavTmdb, watchDiscover, trailerDiscover) {
+                    Text(uiLabel("Dans tes sources"), color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    if (arabic.isEmpty()) Text(uiLabel("Aucun contenu arabe détecté dans tes sources (catégories AR, Arabic, Maghreb…)."), color = muted)
+                    arabic.groupBy { it.group }.entries.sortedByDescending { it.value.size }.take(12).forEach { (g, items) -> ChannelShelf(g, items.take(40), favorites, playChannel, toggleFavorite) }
+                }
                 else if (page == "Plateformes") PlatformsPage(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), favTmdb, toggleFavTmdb, watchDiscover, trailerDiscover)
                 else Row(Modifier.weight(1f).fillMaxWidth()) {
-                Column(Modifier.weight(if (panelItem != null) 0.58f else 1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(horizontal = 38.dp, vertical = 12.dp)) {
+                Column(Modifier.weight(if (panelItem != null) 0.58f else 1f).fillMaxHeight().verticalScroll(homeScroll).padding(horizontal = 38.dp, vertical = 12.dp)) {
                     Spacer(Modifier.height(8.dp))
                     when (page) {
                         "Accueil" -> {
@@ -366,12 +405,23 @@ private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<
                             val hero = featured.getOrNull(featuredIndex % featured.size.coerceAtLeast(1))
                             val heroImg = if (hero != null) rememberPoster(hero) else ""
                             if (hero != null) {
-                            Box(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(22.dp))
+                            Box(Modifier.fillMaxWidth().height(260.dp).onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.clip(RoundedCornerShape(22.dp))
                                 .background(Brush.horizontalGradient(listOf(Color(0xFF392358), Color(0xFF172744), Color(0xFF0C1220))))) {
-                                if (heroImg.startsWith("https://", true)) AsyncImage(model = heroImg, contentDescription = null, contentScale = ContentScale.Crop, alpha = 0.3f, modifier = Modifier.fillMaxSize())
+                                if (heroImg.startsWith("https://", true)) {
+                                    // Faint backdrop with a dark fade from the left so the text stays readable.
+                                    AsyncImage(model = heroImg, contentDescription = null, contentScale = ContentScale.Crop, alignment = Alignment.TopCenter, alpha = 0.3f, modifier = Modifier.fillMaxSize())
+                                    Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0xF2101626), Color(0xB3101626), Color(0x33101626)))))
+                                }
+                                // The poster slot is always drawn, so changing title with the arrows never makes the layout jump.
+                                Box(Modifier.align(Alignment.CenterEnd).padding(end = 190.dp).width(150.dp).height(225.dp)
+                                    .clip(RoundedCornerShape(12.dp)).background(Brush.linearGradient(listOf(Color(0xFF433A72), Color(0xFF204263))))
+                                    .border(2.dp, Color(0x66FFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                                    if (heroImg.startsWith("https://", true)) AsyncImage(model = heroImg, contentDescription = hero.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                                    else Icon(Icons.Default.Movie, null, tint = Color(0xFFE2D6FF), modifier = Modifier.size(40.dp))
+                                }
                                 Box(Modifier.align(Alignment.CenterEnd).size(270.dp)
                                     .background(Brush.radialGradient(listOf(Color(0x665D53B8), Color.Transparent))))
-                                Column(Modifier.align(Alignment.CenterStart).fillMaxWidth(0.79f).padding(32.dp)) {
+                                Column(Modifier.align(Alignment.CenterStart).fillMaxWidth(0.62f).padding(32.dp)) {
                                     Text(uiLabel("ZALADINTV  /  À LA UNE"), color = Color(0xFFC8B6FF), fontSize = 12.sp, letterSpacing = 2.sp)
                                     Spacer(Modifier.height(13.dp))
                                     Text(hero?.name ?: uiLabel("Bienvenue dans ZaladinTV"), color = Color.White,
@@ -395,8 +445,8 @@ private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<
                                 }
                                 if (featured.size > 1) {
                                     Row(Modifier.align(Alignment.BottomEnd).padding(20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        OutlinedButton(onClick = { featuredIndex = (featuredIndex + featured.size - 1) % featured.size }) { Text(uiLabel("‹")) }
-                                        OutlinedButton(onClick = { featuredIndex = (featuredIndex + 1) % featured.size }) { Text(uiLabel("›")) }
+                                        HeroArrow(Icons.Default.ArrowBack) { featuredIndex = (featuredIndex + featured.size - 1) % featured.size }
+                                        HeroArrow(Icons.Default.ArrowForward) { featuredIndex = (featuredIndex + 1) % featured.size }
                                     }
                                 }
                             }
@@ -445,76 +495,130 @@ private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<
                             }
                         }
                         "Réglages" -> {
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                listOf("Bibliothèque", "Langue", "Lecture", "Données", "À propos").forEach { t -> FavChip(t, settingsTab == t) { settingsTab = t } }
-                            }
-                            Spacer(Modifier.height(22.dp))
-                            when (settingsTab) {
-                                "Bibliothèque" -> {
-                            PhoneSetupCard(addAccount)
-                            Text(uiLabel("Mes sources Xtream"), color = Color.White, fontSize = 19.sp)
-                            Spacer(Modifier.height(8.dp))
-                            if (accounts.isEmpty()) Text(uiLabel("Aucune source pour l'instant."), color = muted)
-                            accounts.forEach { acc ->
-                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(acc.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                                        Text(acc.server + "  •  " + uiLabel(statuses[acc.id] ?: ""), color = muted, fontSize = 12.sp)
-                                    }
-                                    OutlinedButton(onClick = { removeAccount(acc.id) }) { Text(uiLabel("Supprimer")) }
-                                }
-                            }
-                            Spacer(Modifier.height(22.dp))
-                            Text(uiLabel("Ajouter une source Xtream"), color = Color.White, fontSize = 19.sp)
-                            TvField(value = accName, onValueChange = { accName = it }, label = { Text(uiLabel("Nom (facultatif)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            TvField(value = server, onValueChange = { server = it }, label = { Text(uiLabel("Serveur (ex. http://monserveur.example:8080)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            TvField(value = username, onValueChange = { username = it }, label = { Text(uiLabel("Identifiant")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            TvField(value = password, onValueChange = { password = it }, label = { Text(uiLabel("Mot de passe")) }, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            Button(onClick = {
-                                remoteStatus = uiLabel("Chargement…")
-                                addAccount(accName, server, username, password) { r ->
-                                    remoteStatus = r
-                                    if (!r.startsWith("Connexion impossible") && !r.startsWith("Cette source")) { accName = ""; server = ""; username = ""; password = "" }
-                                }
-                            }, enabled = (server.startsWith("https://") || server.startsWith("http://")) && username.isNotBlank() && password.isNotBlank()) { Text(uiLabel("Ajouter la source")) }
-                            Text(uiLabel(remoteStatus), color = muted)
-                            Spacer(Modifier.height(14.dp))
-                            Text(uiLabel(message), color = muted)
-                            Spacer(Modifier.height(12.dp))
-                            Text(uiLabel("Aucun contenu n’est fourni. Ajoute uniquement des sources auxquelles tu as droit. Tu peux en ajouter plusieurs : leurs films et séries sont regroupés."), color = muted)
-                                }
-                                "Langue" -> {
-                                    Text(uiLabel("Langue de l'application et des fiches"), color = Color.White, fontSize = 19.sp)
-                                    Spacer(Modifier.height(12.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        listOf("fr" to "Français", "en" to "English").forEach { (code, name) -> FavChip(name, Lang.code == code) { setLang(code) } }
-                                    }
-                                }
-                                "Lecture" -> {
-                                    Text(uiLabel("Reprendre là où je me suis arrêté"), color = Color.White, fontSize = 19.sp)
-                                    Spacer(Modifier.height(12.dp))
-                                    Button(onClick = { resumeOn = !resumeOn; prefs.edit().putBoolean("resume", resumeOn).apply() }) { Text(uiLabel(if (resumeOn) "Activé" else "Désactivé")) }
-                                }
-                                "Données" -> {
-                                    ConfirmButton("Vider les favoris") { favTmdb.clear(); favorites.clear(); prefs.edit().remove("fav_tmdb").remove("favorites").apply(); dataStatus = "Fait" }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                                // Sidebar, like Apple TV settings: moving over an entry shows its page.
+                                Column(Modifier.width(230.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(uiLabel("Réglages"), color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                                     Spacer(Modifier.height(10.dp))
-                                    ConfirmButton("Effacer « Reprendre le visionnage »") { recent.clear(); prefs.edit().remove("recent").apply(); dataStatus = "Fait" }
-                                    Spacer(Modifier.height(10.dp))
-                                    ConfirmButton("Oublier toutes les sources") { forgetSource(); dataStatus = "Fait" }
-                                    Spacer(Modifier.height(10.dp))
-                                    ConfirmButton("Vider le cache des images") {
-                                        context.imageLoader.memoryCache?.clear(); context.imageLoader.diskCache?.clear(); dataStatus = "Fait"
-                                    }
-                                    Spacer(Modifier.height(12.dp))
-                                    Text(uiLabel(dataStatus), color = muted)
+                                    listOf("Bibliothèque" to Icons.Default.VideoLibrary, "Langue" to Icons.Default.Language, "Menu" to Icons.Default.Menu,
+                                        "Lecture" to Icons.Default.PlayArrow, "DNS" to Icons.Default.Dns, "VPN" to Icons.Default.VpnKey, "Données" to Icons.Default.Delete, "À propos" to Icons.Default.Info
+                                    ).forEach { (t, ic) -> SideItem(ic, t, settingsTab == t) { settingsTab = t } }
                                 }
-                                "À propos" -> {
-                                    UpdateCard()
-                                    Text("ZaladinTV  " + BuildConfig.VERSION_NAME, color = Color.White, fontSize = 19.sp)
-                                    Spacer(Modifier.height(8.dp))
-                                    Text(uiLabel("Licence MIT"), color = muted)
-                                    Spacer(Modifier.height(14.dp))
-                                    Text(uiLabel("Les fiches, affiches et bandes-annonces viennent de TMDB. Ce produit utilise l'API TMDB mais n'est ni approuvé ni certifié par TMDB."), color = muted)
+                                Column(Modifier.weight(1f)) {
+                                    when (settingsTab) {
+                                        "Bibliothèque" -> {
+                                            SectionTitle("Sources")
+                                            SettingsCard {
+                                                if (accounts.isEmpty()) Text(uiLabel("Aucune source pour l'instant."), color = muted)
+                                                accounts.forEachIndexed { i, acc ->
+                                                    if (i > 0) Spacer(Modifier.height(8.dp))
+                                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                        ToggleRow(acc.name, acc.server + "  •  " + uiLabel(statuses[acc.id] ?: "") + "  •  " + uiLabel("Français seulement"), acc.frOnly, Modifier.weight(1f)) { toggleFr(acc.id) }
+                                                        RemoveButton { removeAccount(acc.id) }
+                                                    }
+                                                }
+                                            }
+                                            Spacer(Modifier.height(10.dp))
+                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                                Column(Modifier.weight(1f)) {
+                                                    SectionTitle("Ajouter avec le téléphone")
+                                                    SettingsCard {
+                                                        PhoneSetupCard("Scanne avec ton téléphone (même Wi-Fi), puis saisis ta source Xtream.") { setStatus ->
+                                                            PhoneSetupServer(onXtream = { n, s, u, pw -> setStatus(uiLabel("Reçu, chargement…")); addAccount(n, s, u, pw) { r -> setStatus(r) } })
+                                                        }
+                                                    }
+                                                }
+                                                Column(Modifier.weight(1f)) {
+                                                    SectionTitle("Ajout manuel")
+                                                    SettingsCard {
+                                                        TvField(value = accName, onValueChange = { accName = it }, label = { Text(uiLabel("Nom (facultatif)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                                        Spacer(Modifier.height(6.dp))
+                                                        TvField(value = server, onValueChange = { server = it }, label = { Text(uiLabel("Serveur (http://…)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                                        Spacer(Modifier.height(6.dp))
+                                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                            TvField(value = username, onValueChange = { username = it }, label = { Text(uiLabel("Identifiant")) }, modifier = Modifier.weight(1f), singleLine = true)
+                                                            TvField(value = password, onValueChange = { password = it }, label = { Text(uiLabel("Mot de passe")) }, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.weight(1f), singleLine = true)
+                                                        }
+                                                        Spacer(Modifier.height(8.dp))
+                                                        Button(onClick = {
+                                                            remoteStatus = uiLabel("Chargement…")
+                                                            addAccount(accName, server, username, password) { r ->
+                                                                remoteStatus = r
+                                                                if (!r.startsWith("Connexion impossible") && !r.startsWith("Cette source")) { accName = ""; server = ""; username = ""; password = "" }
+                                                            }
+                                                        }, enabled = (server.startsWith("https://") || server.startsWith("http://")) && username.isNotBlank() && password.isNotBlank()) { Text(uiLabel("Ajouter la source")) }
+                                                        if (remoteStatus.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(uiLabel(remoteStatus), color = muted, fontSize = 13.sp) }
+                                                    }
+                                                }
+                                            }
+                                            Spacer(Modifier.height(8.dp))
+                                            Text(uiLabel(message) + "  •  " + uiLabel("Ajoute uniquement des sources auxquelles tu as droit."), color = muted, fontSize = 12.sp)
+                                        }
+                                        "Langue" -> {
+                                            SectionTitle("Langue de l'application et des fiches")
+                                            SettingsCard {
+                                                listOf("fr" to "Français", "en" to "English").forEachIndexed { i, (code, name) ->
+                                                    if (i > 0) Spacer(Modifier.height(6.dp))
+                                                    CheckRow(name, Lang.code == code) { setLang(code) }
+                                                }
+                                            }
+                                        }
+                                        "Menu" -> {
+                                            SectionTitle("Onglets du menu")
+                                            SettingsCard {
+                                                ToggleRow(uiLabel("Onglet Arabe"), uiLabel("Active les onglets supplémentaires du menu du haut."), arabicTab) {
+                                                    arabicTab = !arabicTab; prefs.edit().putBoolean("arabic_tab", arabicTab).apply()
+                                                }
+                                            }
+                                        }
+                                        "Lecture" -> {
+                                            SectionTitle("Lecture")
+                                            SettingsCard {
+                                                ToggleRow(uiLabel("Reprendre là où je me suis arrêté"), "", resumeOn) { resumeOn = !resumeOn; prefs.edit().putBoolean("resume", resumeOn).apply() }
+                                            }
+                                        }
+                                        "DNS" -> {
+                                            SectionTitle("DNS")
+                                            Text(uiLabel("Choisis le serveur DNS utilisé par ZaladinTV (chiffré). Il ne change que le trafic de l'appli, pas le reste de la TV."), color = muted, fontSize = 12.sp, modifier = Modifier.padding(start = 6.dp, bottom = 8.dp))
+                                            SettingsCard {
+                                                listOf(DnsChoice.SYSTEM to "Système (par défaut)", DnsChoice.ADGUARD to "AdGuard (bloque pubs et traqueurs)",
+                                                    DnsChoice.ADGUARD_FAMILY to "AdGuard Famille (filtre adulte)", DnsChoice.ADGUARD_UNFILTERED to "AdGuard sans filtre",
+                                                    DnsChoice.CLOUDFLARE to "Cloudflare 1.1.1.1").forEachIndexed { i, (key, label) ->
+                                                    if (i > 0) Spacer(Modifier.height(6.dp))
+                                                    CheckRow(uiLabel(label), dnsChoice == key) { dnsChoice = key; Net.dns = key; prefs.edit().putString("dns", key).apply() }
+                                                }
+                                            }
+                                        }
+                                        "VPN" -> VpnPage(vpn, startVpn, appScope)
+                                        "Données" -> {
+                                            SectionTitle("Données")
+                                            SettingsCard {
+                                                ConfirmButton("Vider les favoris") { favTmdb.clear(); favorites.clear(); prefs.edit().remove("fav_tmdb").remove("favorites").apply(); dataStatus = "Fait" }
+                                                Spacer(Modifier.height(10.dp))
+                                                ConfirmButton("Effacer « Reprendre le visionnage »") { recent.clear(); prefs.edit().remove("recent").apply(); dataStatus = "Fait" }
+                                                Spacer(Modifier.height(10.dp))
+                                                ConfirmButton("Oublier toutes les sources") { forgetSource(); dataStatus = "Fait" }
+                                                Spacer(Modifier.height(10.dp))
+                                                ConfirmButton("Vider le cache des images") {
+                                                    context.imageLoader.memoryCache?.clear(); context.imageLoader.diskCache?.clear(); dataStatus = "Fait"
+                                                }
+                                                if (dataStatus.isNotBlank()) { Spacer(Modifier.height(10.dp)); Text(uiLabel(dataStatus), color = muted) }
+                                            }
+                                        }
+                                        "À propos" -> {
+                                            SectionTitle("Mise à jour")
+                                            SettingsCard { UpdateCard() }
+                                            Spacer(Modifier.height(18.dp))
+                                            SectionTitle("À propos")
+                                            SettingsCard {
+                                                Text("ZaladinTV  " + BuildConfig.VERSION_NAME, color = Color.White, fontSize = 19.sp)
+                                                Spacer(Modifier.height(8.dp))
+                                                Text(uiLabel("Licence MIT"), color = muted)
+                                                Spacer(Modifier.height(12.dp))
+                                                Text(uiLabel("Les fiches, affiches et bandes-annonces viennent de TMDB. Ce produit utilise l'API TMDB mais n'est ni approuvé ni certifié par TMDB."), color = muted, fontSize = 13.sp)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -531,10 +635,13 @@ private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<
 private fun NavigationItem(name: String, icon: ImageVector, selected: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(50.dp)
     var focused by remember { mutableStateOf(false) }
-    Row(Modifier.scale(if (focused) 1.06f else 1f).background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF2B3D72) else Color.Transparent, shape).onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, null, tint = if (selected) Color.White else muted, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(uiLabel(name), color = if (selected) Color.White else muted, fontSize = 12.sp, maxLines = 1, softWrap = false)
+    Row(Modifier.scale(if (focused) 1.06f else 1f).background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF2B3D72) else Color.Transparent, shape).onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, uiLabel(name), tint = if (selected) Color.White else muted, modifier = Modifier.size(16.dp))
+        // "Quitter" is icon-only so the nine tabs fit on one line.
+        if (name != "Quitter") {
+            Spacer(Modifier.width(5.dp))
+            Text(uiLabel(name), color = if (selected) Color.White else muted, fontSize = 12.sp, maxLines = 1, softWrap = false)
+        }
     }
 }
 
@@ -645,7 +752,9 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
     val prefs = remember { context.getSharedPreferences("zaladintv", Activity.MODE_PRIVATE) }
     val posKey = "pos_${channel.url.hashCode()}"
     val player = remember(channel.url) {
-        ExoPlayer.Builder(context).build().apply {
+        ExoPlayer.Builder(context).setMediaSourceFactory(
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(Net.client))
+        ).build().apply {
             val saved = if (prefs.getBoolean("resume", true)) prefs.getLong(posKey, 0L) else 0L
             setMediaItem(MediaItem.fromUri(Uri.parse(channel.url)), if (saved > 10_000L) saved else 0L)
             prepare()
@@ -691,12 +800,17 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
     }
 }
 
+private val posterCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
 @Composable
 private fun rememberPoster(channel: Channel): String {
-    var poster by remember(channel.url) { mutableStateOf(channel.logo) }
+    // Remembered across tab switches: coming back to Accueil no longer repeats the TMDB lookup.
+    val key = channel.type + "|" + channel.name
+    var poster by remember(channel.url) { mutableStateOf(channel.logo.ifBlank { posterCache[key].orEmpty() }) }
     LaunchedEffect(channel.url) {
         if (poster.isBlank() && (channel.type == "Films" || channel.type == "Séries" || channel.type.isBlank())) {
             poster = withContext(Dispatchers.IO) { TmdbClient.poster(channel.name, channel.type == "Séries") }
+            if (poster.isNotBlank()) posterCache[key] = poster
         }
     }
     return poster
@@ -743,6 +857,7 @@ private fun TvField(value: String, onValueChange: (String) -> Unit, label: @Comp
     // On TV the keyboard must open only when the user presses OK on the field, not when D-pad focus passes over it.
     var editing by remember { mutableStateOf(false) }
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     LaunchedEffect(editing) { if (editing) keyboard?.show() else keyboard?.hide() }
     OutlinedTextField(value = value, onValueChange = onValueChange, label = label, singleLine = singleLine,
         visualTransformation = visualTransformation, readOnly = !editing,
@@ -750,7 +865,12 @@ private fun TvField(value: String, onValueChange: (String) -> Unit, label: @Comp
         keyboardActions = KeyboardActions(onDone = { editing = false }),
         modifier = modifier.onFocusChanged { if (!it.isFocused) editing = false }.onPreviewKeyEvent { e ->
             val ok = e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter
-            if (!editing && ok) { if (e.type == KeyEventType.KeyUp) editing = true; true } else false
+            val side = e.key == Key.DirectionLeft || e.key == Key.DirectionRight
+            if (!editing && side) {
+                // Not typing: left/right must move the focus (to the settings sidebar, to the next field), not the text cursor.
+                if (e.type == KeyEventType.KeyDown) focusManager.moveFocus(if (e.key == Key.DirectionLeft) androidx.compose.ui.focus.FocusDirection.Left else androidx.compose.ui.focus.FocusDirection.Right)
+                true
+            } else if (!editing && ok) { if (e.type == KeyEventType.KeyUp) editing = true; true } else false
         })
 }
 
@@ -796,4 +916,148 @@ fun MoreChip(onClick: () -> Unit) {
         modifier = Modifier.scale(if (focused) 1.06f else 1f).onFocusChanged { focused = it.isFocused }
             .background(if (focused) Color(0xFF3B4F8F) else Color(0xFF1B2440), RoundedCornerShape(50.dp))
             .clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 7.dp))
+}
+
+/** Round previous/next button of the home banner: solid dark disc, white arrow, white ring when focused. */
+@Composable
+private fun HeroArrow(icon: ImageVector, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Box(Modifier.size(50.dp).scale(if (focused) 1.12f else 1f).clip(CircleShape)
+        .background(if (focused) Color(0xFF5B4AA8) else Color(0xCC0B1020))
+        .border(if (focused) 3.dp else 1.dp, if (focused) Color.White else Color(0x66FFFFFF), CircleShape)
+        .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+        Icon(icon, null, tint = Color.White, modifier = Modifier.size(26.dp))
+    }
+}
+
+// ---------------------------------------------------------------- Apple-style settings building blocks
+private val cardBg = Color(0xFF161B28)
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(uiLabel(text).uppercase(), color = Color(0xFF8A93A8), fontSize = 12.sp, letterSpacing = 1.2.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
+}
+
+@Composable
+private fun SettingsCard(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(cardBg)
+        .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(20.dp)).padding(12.dp), content = content)
+}
+
+@Composable
+private fun SideItem(icon: ImageVector, label: String, selected: Boolean, onSelect: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+        .background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF232C45) else Color.Transparent)
+        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
+        .onFocusChanged { focused = it.isFocused; if (it.isFocused) onSelect() }.clickable(onClick = onSelect)
+        .padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = if (selected || focused) Color.White else muted, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(12.dp))
+        Text(uiLabel(label), color = if (selected || focused) Color.White else muted, fontSize = 15.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+    }
+}
+
+/** One focus target per row (like Apple TV): press OK anywhere on the row to flip the switch. */
+@Composable
+private fun ToggleRow(title: String, subtitle: String, checked: Boolean, modifier: Modifier = Modifier, showSwitch: Boolean = true, onToggle: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Row(modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+        .background(if (focused) Color(0xFF2B3552) else Color(0xFF1C2232))
+        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
+        .onFocusChanged { focused = it.isFocused }.clickable(onClick = onToggle).padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (subtitle.isNotBlank()) Text(subtitle, color = muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (showSwitch) {
+            Spacer(Modifier.width(12.dp))
+            Box(Modifier.width(54.dp).height(31.dp).clip(RoundedCornerShape(50.dp)).background(if (checked) Color(0xFF34C759) else Color(0xFF3A3F4F))) {
+                Box(Modifier.padding(3.dp).align(if (checked) Alignment.CenterEnd else Alignment.CenterStart).size(25.dp).clip(CircleShape).background(Color.White))
+            }
+        }
+    }
+}
+
+@Composable
+private fun CheckRow(title: String, selected: Boolean, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+        .background(if (focused) Color(0xFF2B3552) else Color(0xFF1C2232))
+        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
+        .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
+        if (selected) Icon(Icons.Default.Check, null, tint = Color(0xFF34C759), modifier = Modifier.size(22.dp))
+    }
+}
+
+/** Two presses: the first one asks for confirmation, so a source can't be removed by a stray OK. */
+@Composable
+private fun RemoveButton(onRemove: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    var armed by remember { mutableStateOf(false) }
+    Text(uiLabel(if (armed) "Confirmer ?" else "Supprimer"), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.clip(RoundedCornerShape(50.dp))
+            .background(if (armed) Color(0xFFD64545) else if (focused) Color(0xFF3B4F8F) else Color(0xFF2A3047))
+            .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(50.dp))
+            .onFocusChanged { focused = it.isFocused; if (!it.isFocused) armed = false }
+            .clickable { if (armed) { armed = false; onRemove() } else armed = true }
+            .padding(horizontal = 18.dp, vertical = 12.dp))
+}
+
+/** Settings > VPN: switch, country, public address check, and the QR code to send the WireGuard key from a phone. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun VpnPage(vpn: Vpn, startVpn: () -> Unit, scope: kotlinx.coroutines.CoroutineScope) {
+    val state by vpn.state.collectAsState()
+    val enabled by vpn.enabled.collectAsState()
+    val configured by vpn.configured.collectAsState()
+    val choices by vpn.choices.collectAsState()
+    val selected by vpn.selected.collectAsState()
+    var ip by remember { mutableStateOf("") }
+    LaunchedEffect(state) { if (state is VpnState.NeedsPermission && enabled) startVpn() }
+    val status = when (val st = state) {
+        VpnState.Off -> uiLabel("Désactivé")
+        VpnState.Connecting -> uiLabel("Connexion…")
+        is VpnState.On -> uiLabel("Connecté") + " · " + st.server
+        VpnState.NeedsPermission -> uiLabel("Autorisation Android requise")
+        is VpnState.Failed -> uiLabel("Échec") + " : " + st.message
+    }
+    SectionTitle("VPN")
+    Text(uiLabel("VPN WireGuard réservé à ZaladinTV : le reste de la TV garde sa connexion normale. Tu fournis ta propre clé (par exemple un fichier WireGuard gratuit de Proton VPN)."),
+        color = muted, fontSize = 12.sp, modifier = Modifier.padding(start = 6.dp, bottom = 8.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(Modifier.weight(1f)) {
+            SettingsCard {
+                ToggleRow(uiLabel("Activer le VPN"), if (configured) status else uiLabel("Ajoute d'abord une clé."), enabled && configured) {
+                    if (!configured) return@ToggleRow
+                    if (enabled) { vpn.setEnabled(false); scope.launch { vpn.disconnect() } } else { vpn.setEnabled(true); startVpn() }
+                }
+                if (choices.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        choices.forEach { code -> FavChip(Vpn.countryName(code), selected == code) { scope.launch { vpn.select(code) } } }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                ToggleRow(uiLabel("Mon adresse IP"), if (ip.isBlank()) uiLabel("Appuie pour vérifier") else ip, false, showSwitch = false) {
+                    ip = uiLabel("Vérification…")
+                    scope.launch { ip = try { vpn.publicIp(Net.client) } catch (e: Exception) { uiLabel("Échec") + " : " + e.localizedMessage } }
+                }
+            }
+        }
+        Column(Modifier.weight(1f)) {
+            SettingsCard {
+                PhoneSetupCard("Scanne avec ton téléphone (même Wi-Fi), puis colle le fichier WireGuard.") { setStatus ->
+                    PhoneSetupServer(onVpn = { text ->
+                        val n = vpn.importConfigs(text)
+                        if (n > 0) { vpn.setEnabled(true); startVpn(); setStatus("$n " + uiLabel("clé(s) reçue(s)")) } else setStatus(uiLabel("Aucune clé WireGuard valide dans ce texte."))
+                    })
+                }
+            }
+        }
+    }
 }

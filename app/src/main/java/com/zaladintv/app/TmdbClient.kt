@@ -26,12 +26,10 @@ object TmdbClient {
     private fun get(path: String, lang: String = Lang.tmdb): JSONObject {
         require(key.isNotBlank()) { "Clé TMDB absente (tmdb.key dans local.properties)" }
         val sep = if (path.contains('?')) "&" else "?"
-        val conn = URL("$BASE/$path${sep}api_key=${URLEncoder.encode(key, "UTF-8")}&language=$lang").openConnection() as HttpURLConnection
-        conn.connectTimeout = 10000; conn.readTimeout = 15000
-        try {
-            require(conn.responseCode in 200..299) { if (conn.responseCode == 401) "Clé TMDB invalide" else "TMDB HTTP ${conn.responseCode}" }
-            return JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-        } finally { conn.disconnect() }
+        Net.get("$BASE/$path${sep}api_key=${URLEncoder.encode(key, "UTF-8")}&language=$lang", 10_000, 15_000).use { r ->
+            require(r.isSuccessful) { if (r.code == 401) "Clé TMDB invalide" else "TMDB HTTP ${r.code}" }
+            return JSONObject(r.body?.string().orEmpty())
+        }
     }
 
     fun cleanTitle(name: String): Pair<String, String?> {
@@ -97,15 +95,13 @@ object TmdbClient {
     /** Intro range (start ms, end ms) from theintrodb.org for a movie or a TV episode, or null when unknown. */
     fun intro(id: Int, series: Boolean, season: Int, episode: Int): Pair<Long, Long>? {
         val q = if (series && season > 0 && episode > 0) "&season=$season&episode=$episode" else ""
-        val conn = URL("https://api.theintrodb.org/v2/media?tmdb_id=$id$q").openConnection() as HttpURLConnection
-        conn.connectTimeout = 8000; conn.readTimeout = 10000
-        try {
-            if (conn.responseCode !in 200..299) return null
-            val arr = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).optJSONArray("intro") ?: return null
+        Net.get("https://api.theintrodb.org/v2/media?tmdb_id=$id$q", 8_000, 10_000).use { r ->
+            if (!r.isSuccessful) return null
+            val arr = JSONObject(r.body?.string().orEmpty()).optJSONArray("intro") ?: return null
             val o = arr.optJSONObject(0) ?: return null
             if (o.isNull("end_ms")) return null
             return (if (o.isNull("start_ms")) 0L else o.optLong("start_ms")) to o.optLong("end_ms")
-        } finally { conn.disconnect() }
+        }
     }
 
     /** Poster URL for a library title, cached in memory. Blank when none found. */
