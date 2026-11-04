@@ -94,7 +94,7 @@ class MainActivity : ComponentActivity() {
     private fun importRemote(url: String, onDone: (String) -> Unit) {
         Thread {
             try {
-                require(url.startsWith("https://", true)) { "Utilise une URL HTTPS" }
+                require(url.startsWith("http://", true) || url.startsWith("https://", true)) { "Utilise une URL http:// ou https://" }
                 val connection = URL(url).openConnection().apply { connectTimeout = 12000; readTimeout = 20000 }
                 val text = connection.getInputStream().bufferedReader().use { it.readText().take(12_000_000) }
                 val parsed = parseM3u(text)
@@ -162,7 +162,7 @@ private fun parseM3u(content: String): List<Channel> {
                 logo = attrs["tvg-logo"] ?: ""
             }
             line.isNotBlank() && !line.startsWith('#') -> {
-                if (line.startsWith("https://", true)) out += Channel(title.ifBlank { uiLabel("Chaîne") }, line, group, logo)
+                if (line.startsWith("https://", true) || line.startsWith("http://", true)) out += Channel(title.ifBlank { uiLabel("Chaîne") }, line, group, logo)
                 title = ""; group = "Autres"; logo = ""
             }
         }
@@ -474,23 +474,24 @@ private fun NovaScreen(channels: List<Channel>, message: String, importPlaylist:
                             Spacer(Modifier.height(22.dp))
                             when (settingsTab) {
                                 "Bibliothèque" -> {
+                            PhoneSetupCard(importRemote, connectXtream)
                             Button(onClick = importPlaylist) { Text(uiLabel("Importer un fichier M3U / M3U8")) }
                             Spacer(Modifier.height(12.dp))
                             Spacer(Modifier.height(18.dp))
-                            Text(uiLabel("Importer une playlist HTTPS"), color = Color.White, fontSize = 19.sp)
+                            Text(uiLabel("Importer une playlist (lien http ou https)"), color = Color.White, fontSize = 19.sp)
                             TvField(value = playlistUrl, onValueChange = { playlistUrl = it }, label = { Text(uiLabel("https://exemple.org/playlist.m3u")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                             Spacer(Modifier.height(8.dp))
-                            Button(onClick = { importRemote(playlistUrl) { remoteStatus = it } }, enabled = playlistUrl.startsWith("https://")) { Text(uiLabel("Charger la playlist")) }
+                            Button(onClick = { importRemote(playlistUrl) { remoteStatus = it } }, enabled = playlistUrl.startsWith("https://") || playlistUrl.startsWith("http://")) { Text(uiLabel("Charger la playlist")) }
                             Text(uiLabel(remoteStatus), color = muted)
                             Spacer(Modifier.height(14.dp))
                             Text(uiLabel(message), color = muted)
                             Spacer(Modifier.height(12.dp))
                             Spacer(Modifier.height(22.dp))
                             Text(uiLabel("Connexion à une source Xtream autorisée"), color = Color.White, fontSize = 19.sp)
-                            TvField(value = server, onValueChange = { server = it }, label = { Text(uiLabel("Serveur HTTPS (ex. https://monserveur.example)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            TvField(value = server, onValueChange = { server = it }, label = { Text(uiLabel("Serveur (ex. http://monserveur.example:8080)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                             TvField(value = username, onValueChange = { username = it }, label = { Text(uiLabel("Identifiant")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                             TvField(value = password, onValueChange = { password = it }, label = { Text(uiLabel("Mot de passe")) }, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            Button(onClick = { connectXtream(server, username, password) { remoteStatus = it } }, enabled = server.startsWith("https://") && username.isNotBlank() && password.isNotBlank()) { Text(uiLabel("Charger films et séries")) }
+                            Button(onClick = { connectXtream(server, username, password) { remoteStatus = it } }, enabled = (server.startsWith("https://") || server.startsWith("http://")) && username.isNotBlank() && password.isNotBlank()) { Text(uiLabel("Charger films et séries")) }
                             Spacer(Modifier.height(12.dp))
                             Spacer(Modifier.height(12.dp))
                             Text(uiLabel("Aucun contenu n’est fourni. Les catégories Films et Séries sont détectées à partir des groupes M3U (VOD, Films, Series…). Utilise uniquement des sources autorisées."), color = muted)
@@ -521,6 +522,7 @@ private fun NovaScreen(channels: List<Channel>, message: String, importPlaylist:
                                     Text(uiLabel(dataStatus), color = muted)
                                 }
                                 "À propos" -> {
+                                    UpdateCard()
                                     Text("ZaladinTV  " + BuildConfig.VERSION_NAME, color = Color.White, fontSize = 19.sp)
                                     Spacer(Modifier.height(8.dp))
                                     Text(uiLabel("Licence MIT"), color = muted)

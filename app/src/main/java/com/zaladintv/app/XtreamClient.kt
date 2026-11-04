@@ -8,7 +8,7 @@ import java.net.URLEncoder
 
 /** Reads only the catalog supplied by a user-authorized Xtream-compatible service. */
 class XtreamClient(private val server: String, private val user: String, private val password: String) {
-    init { require(server.startsWith("https://", true)) { "Serveur HTTPS requis" } }
+    init { require(server.startsWith("http://", true) || server.startsWith("https://", true)) { "Adresse du serveur invalide (http:// ou https://)" } }
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     private val root = server.trimEnd('/')
     private fun api(action: String, extra: String = ""): String =
