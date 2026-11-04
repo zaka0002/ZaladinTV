@@ -48,7 +48,7 @@ import kotlin.concurrent.thread
  * (playlist link or Xtream login) so nobody has to type on the TV remote. Only reachable on the home Wi-Fi,
  * and only through the random token that is in the QR code.
  */
-class PhoneSetupServer(private val onPlaylist: (String) -> Unit, private val onXtream: (String, String, String) -> Unit) {
+class PhoneSetupServer(private val onXtream: (String, String, String, String) -> Unit) {
     private val alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
     private val rnd = SecureRandom()
     val token = (1..8).map { alphabet[rnd.nextInt(alphabet.length)] }.joinToString("")
@@ -90,16 +90,11 @@ class PhoneSetupServer(private val onPlaylist: (String) -> Unit, private val onX
             val f = String(body, Charsets.UTF_8).split('&').mapNotNull {
                 val p = it.split('=', limit = 2); if (p.size == 2) URLDecoder.decode(p[0], "UTF-8") to URLDecoder.decode(p[1], "UTF-8").trim() else null
             }.toMap()
-            val url = f["url"].orEmpty()
             val srv = f["server"].orEmpty()
-            when {
-                (url.startsWith("https://") || url.startsWith("http://")) -> { main.post { onPlaylist(url) }; reply(out, 200, page(uiLabel("C'est envoyé à la TV. Tu peux fermer cette page."))) }
-                (srv.startsWith("https://") || srv.startsWith("http://")) && !f["user"].isNullOrBlank() && !f["pass"].isNullOrBlank() -> {
-                    main.post { onXtream(srv, f["user"].orEmpty(), f["pass"].orEmpty()) }
-                    reply(out, 200, page(uiLabel("C'est envoyé à la TV. Tu peux fermer cette page.")))
-                }
-                else -> reply(out, 400, page(uiLabel("Lien invalide : il doit commencer par http:// ou https://")))
-            }
+            if ((srv.startsWith("https://") || srv.startsWith("http://")) && !f["user"].isNullOrBlank() && !f["pass"].isNullOrBlank()) {
+                main.post { onXtream(f["name"].orEmpty(), srv, f["user"].orEmpty(), f["pass"].orEmpty()) }
+                reply(out, 200, page(uiLabel("C'est envoyé à la TV. Tu peux fermer cette page ou en ajouter une autre.")))
+            } else reply(out, 400, page(uiLabel("Lien invalide : il doit commencer par http:// ou https://")))
         } else reply(out, 200, page(""))
     }
 
@@ -114,10 +109,8 @@ class PhoneSetupServer(private val onPlaylist: (String) -> Unit, private val onX
 h1{font-size:22px}h2{font-size:16px;margin-top:28px;color:#c8b6ff}input{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border-radius:10px;border:1px solid #33405f;background:#141b2a;color:#fff;font-size:16px}
 button{width:100%;padding:14px;margin-top:8px;border:0;border-radius:10px;background:#8f6bff;color:#fff;font-size:16px;font-weight:bold}.m{background:#1b3a2a;padding:12px;border-radius:10px}</style></head><body>
 <h1>ZaladinTV</h1>${if (message.isNotBlank()) "<p class=m>$message</p>" else ""}
-<h2>${uiLabel("Playlist M3U (lien http ou https)")}</h2>
-<form method="post"><input name="url" type="url" placeholder="https://exemple.org/playlist.m3u"><button>${uiLabel("Envoyer à la TV")}</button></form>
-<h2>${uiLabel("Source Xtream autorisée")}</h2>
-<form method="post"><input name="server" type="url" placeholder="http://monserveur.example:8080"><input name="user" placeholder="${uiLabel("Identifiant")}" autocapitalize="none">
+<h2>${uiLabel("Ajouter une source Xtream")}</h2>
+<form method="post"><input name="name" placeholder="${uiLabel("Nom (facultatif)")}"><input name="server" type="url" placeholder="http://monserveur.example:8080"><input name="user" placeholder="${uiLabel("Identifiant")}" autocapitalize="none">
 <input name="pass" type="password" placeholder="${uiLabel("Mot de passe")}"><button>${uiLabel("Envoyer à la TV")}</button></form>
 </body></html>"""
 
@@ -143,16 +136,14 @@ fun QrCode(text: String, size: Dp) {
 
 /** Settings block: shows a QR code so a playlist can be entered from a phone instead of the TV remote. */
 @Composable
-fun PhoneSetupCard(importRemote: (String, (String) -> Unit) -> Unit, connectXtream: (String, String, String, (String) -> Unit) -> Unit) {
+fun PhoneSetupCard(addAccount: (String, String, String, String, (String) -> Unit) -> Unit) {
     var shown by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("") }
     var link by remember { mutableStateOf("") }
-    val doPlaylist by rememberUpdatedState(importRemote)
-    val doXtream by rememberUpdatedState(connectXtream)
+    val doAdd by rememberUpdatedState(addAccount)
     val server = remember(shown) {
         if (!shown) null else PhoneSetupServer(
-            onPlaylist = { status = uiLabel("Reçu, chargement…"); doPlaylist(it) { r -> status = r } },
-            onXtream = { s, u, p -> status = uiLabel("Reçu, chargement…"); doXtream(s, u, p) { r -> status = r } })
+            onXtream = { n, s, u, pw -> status = uiLabel("Reçu, chargement…"); doAdd(n, s, u, pw) { r -> status = r } })
     }
     DisposableEffect(server) {
         link = ""
@@ -165,7 +156,7 @@ fun PhoneSetupCard(importRemote: (String, (String) -> Unit) -> Unit, connectXtre
     }
     Text(uiLabel("Ajouter depuis ton téléphone"), color = Color.White, fontSize = 19.sp)
     Spacer(Modifier.height(6.dp))
-    Text(uiLabel("Scanne le QR code avec ton téléphone (même Wi-Fi) et saisis ta playlist sur le téléphone au lieu de la télécommande."), color = Color(0xFF9DA8BF), fontSize = 13.sp)
+    Text(uiLabel("Scanne le QR code avec ton téléphone (même Wi-Fi) et saisis ta source Xtream sur le téléphone au lieu de la télécommande."), color = Color(0xFF9DA8BF), fontSize = 13.sp)
     Spacer(Modifier.height(10.dp))
     Button(onClick = { shown = !shown; status = "" }) { Text(uiLabel(if (shown) "Masquer le QR code" else "Afficher le QR code")) }
     if (shown && link.isNotBlank()) {

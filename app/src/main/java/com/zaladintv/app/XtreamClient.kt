@@ -7,7 +7,7 @@ import java.net.URL
 import java.net.URLEncoder
 
 /** Reads only the catalog supplied by a user-authorized Xtream-compatible service. */
-class XtreamClient(private val server: String, private val user: String, private val password: String) {
+class XtreamClient(private val server: String, private val user: String, private val password: String, val id: String = "") {
     init { require(server.startsWith("http://", true) || server.startsWith("https://", true)) { "Adresse du serveur invalide (http:// ou https://)" } }
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     private val root = server.trimEnd('/')
@@ -53,7 +53,7 @@ class XtreamClient(private val server: String, private val user: String, private
                 val logo = if (kind == "Séries") o.optString("cover") else o.optString("stream_icon")
                 result.add(Channel(o.optString("name", "Sans titre"), url,
                     cats[o.optString("category_id")] ?: kind, logo, kind,
-                    if (kind == "Séries") id else ""))
+                    if (kind == "Séries") id else "", src = this.id))
             }
         }
         add("get_vod_streams", "get_vod_categories", "Films")

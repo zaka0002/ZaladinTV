@@ -71,115 +71,92 @@ private val panel = Color(0xFF141B2A)
 private val accent = Color(0xFFAA89FF)
 private val muted = Color(0xFF9DA8BF)
 
-data class Channel(val name: String, val url: String, val group: String, val logo: String = "", val type: String = "", val seriesId: String = "", val season: Int = 0, val episode: Int = 0, val show: String = "")
+data class Channel(val name: String, val url: String, val group: String, val logo: String = "", val type: String = "", val seriesId: String = "", val season: Int = 0, val episode: Int = 0, val show: String = "", val src: String = "")
+
+data class XtAccount(val id: String, val name: String, val server: String, val user: String, val pass: String)
 
 class MainActivity : ComponentActivity() {
+    private val prefs by lazy { getSharedPreferences("zaladintv", MODE_PRIVATE) }
+    private val accounts = mutableStateListOf<XtAccount>()
+    private val catalogs = mutableMapOf<String, List<Channel>>()
+    private val sessions = mutableStateMapOf<String, XtreamClient>()
+    private val statuses = mutableStateMapOf<String, String>()
     private val channels = mutableStateListOf<Channel>()
-    private var xtreamSession by mutableStateOf<XtreamClient?>(null)
-    private var message by mutableStateOf("Importe une playlist M3U pour commencer")
-    private fun importUri(uri: Uri, persist: Boolean = false) {
+    private var message by mutableStateOf("Ajoute une source Xtream pour commencer")
+
+    private fun saveAccounts() {
+        val arr = org.json.JSONArray()
+        accounts.forEach { arr.put(org.json.JSONObject().put("id", it.id).put("name", it.name).put("server", it.server).put("user", it.user).put("pass", it.pass)) }
+        prefs.edit().putString("xt_accounts", arr.toString()).apply()
+    }
+    private fun loadAccounts() {
         try {
-            if (persist) {
-                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                getSharedPreferences("zaladintv", MODE_PRIVATE).edit().putString("playlist_uri", uri.toString()).apply()
-            }
-            val content = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-            val parsed = parseM3u(content)
-            channels.clear(); channels.addAll(parsed)
-            xtreamSession = null
-            getSharedPreferences("zaladintv", MODE_PRIVATE).edit().remove("xt_server").remove("xt_user").remove("xt_pass").apply()
-            message = "${parsed.size} films et séries importés"
-        } catch (e: Exception) { message = "Import impossible : ${e.localizedMessage}" }
+            val arr = org.json.JSONArray(prefs.getString("xt_accounts", "[]"))
+            for (i in 0 until arr.length()) arr.getJSONObject(i).let { accounts.add(XtAccount(it.getString("id"), it.getString("name"), it.getString("server"), it.getString("user"), it.getString("pass"))) }
+        } catch (e: Exception) { }
+        // Older versions kept a single Xtream account in three keys.
+        val xs = prefs.getString("xt_server", null); val xu = prefs.getString("xt_user", null); val xp = prefs.getString("xt_pass", null)
+        if (xs != null && xu != null && xp != null && accounts.none { it.server == xs && it.user == xu }) {
+            accounts.add(XtAccount(java.util.UUID.randomUUID().toString().take(8), hostOf(xs), xs, xu, xp))
+        }
+        prefs.edit().remove("xt_server").remove("xt_user").remove("xt_pass").remove("playlist_uri").remove("playlist_remote").apply()
+        saveAccounts()
     }
-    private fun importRemote(url: String, onDone: (String) -> Unit) {
+    private fun hostOf(server: String) = try { Uri.parse(server).host ?: server } catch (e: Exception) { server }
+    private fun rebuild() {
+        val merged = accounts.flatMap { catalogs[it.id].orEmpty() }.distinctBy { "${it.type}|${it.name.lowercase()}" }
+        channels.clear(); channels.addAll(merged)
+        message = if (accounts.isEmpty()) "Ajoute une source Xtream pour commencer" else "${merged.size} films et séries"
+    }
+    private fun loadAccount(a: XtAccount, onDone: (Boolean, String) -> Unit) {
+        statuses[a.id] = "Chargement…"
         Thread {
             try {
-                require(url.startsWith("http://", true) || url.startsWith("https://", true)) { "Utilise une URL http:// ou https://" }
-                val connection = URL(url).openConnection().apply { connectTimeout = 12000; readTimeout = 20000 }
-                val text = connection.getInputStream().bufferedReader().use { it.readText().take(12_000_000) }
-                val parsed = parseM3u(text)
-                runOnUiThread {
-                    channels.clear(); channels.addAll(parsed)
-                    xtreamSession = null
-                    getSharedPreferences("zaladintv", MODE_PRIVATE).edit().putString("playlist_remote", url).remove("xt_server").remove("xt_user").remove("xt_pass").apply()
-                    message = "${parsed.size} films et séries importés"
-                    onDone(message)
-                }
-            } catch (e: Exception) { runOnUiThread { message = "Erreur : ${e.localizedMessage}"; onDone(message) } }
-        }.start()
-    }
-    private fun connectXtream(server: String, user: String, password: String, onDone: (String) -> Unit) {
-        Thread {
-            try {
-                val client = XtreamClient(server.trim(), user.trim(), password)
+                val client = XtreamClient(a.server, a.user, a.pass, a.id)
                 val items = client.loadCatalog()
-                runOnUiThread {
-                    channels.clear(); channels.addAll(items)
-                    xtreamSession = client
-                    getSharedPreferences("zaladintv", MODE_PRIVATE).edit().putString("xt_server", server.trim()).putString("xt_user", user.trim()).putString("xt_pass", password).apply()
-                    message = "${items.size} contenus chargés depuis la source"
-                    onDone(message)
-                }
+                runOnUiThread { catalogs[a.id] = items; sessions[a.id] = client; statuses[a.id] = "${items.size} contenus"; rebuild(); onDone(true, "${a.name} : ${items.size} contenus chargés") }
             } catch (e: Exception) {
-                runOnUiThread { message = "Connexion impossible : ${e.localizedMessage}"; onDone(message) }
+                runOnUiThread { statuses[a.id] = "Erreur : ${e.localizedMessage}"; onDone(false, "Connexion impossible : ${e.localizedMessage}") }
             }
         }.start()
     }
-    private val picker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) importUri(uri, true)
+    private fun addAccount(name: String, server: String, user: String, pass: String, onDone: (String) -> Unit) {
+        val s = server.trim().trimEnd('/')
+        if (accounts.any { it.server == s && it.user == user.trim() }) { onDone("Cette source est déjà ajoutée"); return }
+        val a = XtAccount(java.util.UUID.randomUUID().toString().take(8), name.trim().ifBlank { hostOf(s) }, s, user.trim(), pass)
+        accounts.add(a)
+        loadAccount(a) { ok, msg ->
+            if (!ok) { removeAccount(a.id) } else saveAccounts()
+            onDone(msg)
+        }
     }
-    private fun forgetSource() {
-        channels.clear(); xtreamSession = null
-        getSharedPreferences("zaladintv", MODE_PRIVATE).edit().remove("xt_server").remove("xt_user").remove("xt_pass")
-            .remove("playlist_uri").remove("playlist_remote").apply()
-        message = "Importe une playlist M3U pour commencer"
+    private fun removeAccount(id: String) {
+        accounts.removeAll { it.id == id }; catalogs.remove(id); sessions.remove(id); statuses.remove(id)
+        saveAccounts(); rebuild()
+    }
+    private fun forgetAll() {
+        accounts.clear(); catalogs.clear(); sessions.clear(); statuses.clear()
+        saveAccounts(); rebuild()
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Lang.code = getSharedPreferences("zaladintv", MODE_PRIVATE).getString("lang", "fr") ?: "fr"
-        getSharedPreferences("zaladintv", MODE_PRIVATE).getString("playlist_uri", null)?.let {
-            importUri(Uri.parse(it))
-        }
-        getSharedPreferences("zaladintv", MODE_PRIVATE).getString("playlist_remote", null)?.let { importRemote(it) {} }
-        getSharedPreferences("zaladintv", MODE_PRIVATE).let { p ->
-            val xs = p.getString("xt_server", null); val xu = p.getString("xt_user", null); val xp = p.getString("xt_pass", null)
-            if (xs != null && xu != null && xp != null) connectXtream(xs, xu, xp) {}
-        }
-        setContent { NovaScreen(channels, message, { picker.launch(arrayOf("*/*")) }, { url, done -> importRemote(url, done) }, { server, user, password, done -> connectXtream(server, user, password, done) }, xtreamSession, { forgetSource() }) }
+        Lang.code = prefs.getString("lang", "fr") ?: "fr"
+        loadAccounts()
+        accounts.toList().forEach { loadAccount(it) { _, _ -> } }
+        setContent { NovaScreen(channels, message, accounts, statuses, sessions, { n, s, u, p, done -> addAccount(n, s, u, p, done) }, { removeAccount(it) }, { forgetAll() }) }
     }
-}
-
-private fun parseM3u(content: String): List<Channel> {
-    val out = mutableListOf<Channel>()
-    var title = ""; var group = "Autres"; var logo = ""
-    val attr = Regex("([\\w-]+)=\"([^\"]*)\"")
-    content.lineSequence().map { it.trim() }.forEach { line ->
-        when {
-            line.startsWith("#EXTINF", true) -> {
-                val attrs = attr.findAll(line).associate { it.groupValues[1] to it.groupValues[2] }
-                title = line.substringAfter(',', "").trim().ifBlank { attrs["tvg-name"] ?: "Chaîne" }
-                group = attrs["group-title"]?.ifBlank { uiLabel("Autres") } ?: "Autres"
-                logo = attrs["tvg-logo"] ?: ""
-            }
-            line.isNotBlank() && !line.startsWith('#') -> {
-                if (line.startsWith("https://", true) || line.startsWith("http://", true)) out += Channel(title.ifBlank { uiLabel("Chaîne") }, line, group, logo)
-                title = ""; group = "Autres"; logo = ""
-            }
-        }
-    }
-    val vodGroups = listOf("vod", "movie", "film", "cinema", "cinéma", "series", "séries", "serie", "tv shows", "episodes", "saison", "season")
-    return out.filter { ch -> vodGroups.any { ch.group.contains(it, true) } || ch.url.contains("/movie/", true) || ch.url.contains("/series/", true) }.distinctBy { it.url }.take(10000)
 }
 
 @Composable
-private fun NovaScreen(channels: List<Channel>, message: String, importPlaylist: () -> Unit, importRemote: (String, (String) -> Unit) -> Unit, connectXtream: (String, String, String, (String) -> Unit) -> Unit, xtream: XtreamClient?, forgetSource: () -> Unit) {
+private fun NovaScreen(channels: List<Channel>, message: String, accounts: List<XtAccount>, statuses: Map<String, String>, xtreams: Map<String, XtreamClient>,
+                       addAccount: (String, String, String, String, (String) -> Unit) -> Unit, removeAccount: (String) -> Unit, forgetSource: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("zaladintv", Activity.MODE_PRIVATE) }
     val favorites = remember { mutableStateListOf<String>().apply { addAll(prefs.getStringSet("favorites", emptySet()) ?: emptySet()) } }
     var page by remember { mutableStateOf("Accueil") }
     var featuredIndex by remember { mutableIntStateOf(0) }
     var search by remember { mutableStateOf("") }
-    var playlistUrl by remember { mutableStateOf("") }
+    var accName by remember { mutableStateOf("") }
     var remoteStatus by remember { mutableStateOf("") }
     var server by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
@@ -223,13 +200,13 @@ private fun NovaScreen(channels: List<Channel>, message: String, importPlaylist:
     var playing by remember { mutableStateOf<Channel?>(null) }
     val recent = remember { mutableStateListOf<String>().apply { addAll(prefs.getString("recent", "")!!.split("\n").filter { it.isNotBlank() }) } }
     val startChannel: (Channel) -> Unit = { ch ->
-        if (ch.type == "Séries" && ch.seriesId.isNotBlank() && xtream != null) {
+        if (ch.type == "Séries" && ch.seriesId.isNotBlank() && xtreams[ch.src] != null) {
             selectedSeries = ch
             episodes = emptyList()
             episodeStatus = "Chargement des épisodes…"
             scope.launch {
                 try {
-                    episodes = withContext(Dispatchers.IO) { xtream.loadEpisodes(ch.seriesId).map { it.copy(show = ch.name) } }
+                    episodes = withContext(Dispatchers.IO) { xtreams[ch.src]!!.loadEpisodes(ch.seriesId).map { it.copy(show = ch.name) } }
                     episodeStatus = if (episodes.isEmpty()) "Aucun épisode disponible" else "Choisis un épisode"
                 } catch (e: Exception) { episodeStatus = "Erreur : ${e.localizedMessage}" }
             }
@@ -474,27 +451,37 @@ private fun NovaScreen(channels: List<Channel>, message: String, importPlaylist:
                             Spacer(Modifier.height(22.dp))
                             when (settingsTab) {
                                 "Bibliothèque" -> {
-                            PhoneSetupCard(importRemote, connectXtream)
-                            Button(onClick = importPlaylist) { Text(uiLabel("Importer un fichier M3U / M3U8")) }
-                            Spacer(Modifier.height(12.dp))
-                            Spacer(Modifier.height(18.dp))
-                            Text(uiLabel("Importer une playlist (lien http ou https)"), color = Color.White, fontSize = 19.sp)
-                            TvField(value = playlistUrl, onValueChange = { playlistUrl = it }, label = { Text(uiLabel("https://exemple.org/playlist.m3u")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            PhoneSetupCard(addAccount)
+                            Text(uiLabel("Mes sources Xtream"), color = Color.White, fontSize = 19.sp)
                             Spacer(Modifier.height(8.dp))
-                            Button(onClick = { importRemote(playlistUrl) { remoteStatus = it } }, enabled = playlistUrl.startsWith("https://") || playlistUrl.startsWith("http://")) { Text(uiLabel("Charger la playlist")) }
+                            if (accounts.isEmpty()) Text(uiLabel("Aucune source pour l'instant."), color = muted)
+                            accounts.forEach { acc ->
+                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(acc.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                                        Text(acc.server + "  •  " + uiLabel(statuses[acc.id] ?: ""), color = muted, fontSize = 12.sp)
+                                    }
+                                    OutlinedButton(onClick = { removeAccount(acc.id) }) { Text(uiLabel("Supprimer")) }
+                                }
+                            }
+                            Spacer(Modifier.height(22.dp))
+                            Text(uiLabel("Ajouter une source Xtream"), color = Color.White, fontSize = 19.sp)
+                            TvField(value = accName, onValueChange = { accName = it }, label = { Text(uiLabel("Nom (facultatif)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            TvField(value = server, onValueChange = { server = it }, label = { Text(uiLabel("Serveur (ex. http://monserveur.example:8080)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            TvField(value = username, onValueChange = { username = it }, label = { Text(uiLabel("Identifiant")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            TvField(value = password, onValueChange = { password = it }, label = { Text(uiLabel("Mot de passe")) }, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            Button(onClick = {
+                                remoteStatus = uiLabel("Chargement…")
+                                addAccount(accName, server, username, password) { r ->
+                                    remoteStatus = r
+                                    if (!r.startsWith("Connexion impossible") && !r.startsWith("Cette source")) { accName = ""; server = ""; username = ""; password = "" }
+                                }
+                            }, enabled = (server.startsWith("https://") || server.startsWith("http://")) && username.isNotBlank() && password.isNotBlank()) { Text(uiLabel("Ajouter la source")) }
                             Text(uiLabel(remoteStatus), color = muted)
                             Spacer(Modifier.height(14.dp))
                             Text(uiLabel(message), color = muted)
                             Spacer(Modifier.height(12.dp))
-                            Spacer(Modifier.height(22.dp))
-                            Text(uiLabel("Connexion à une source Xtream autorisée"), color = Color.White, fontSize = 19.sp)
-                            TvField(value = server, onValueChange = { server = it }, label = { Text(uiLabel("Serveur (ex. http://monserveur.example:8080)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            TvField(value = username, onValueChange = { username = it }, label = { Text(uiLabel("Identifiant")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            TvField(value = password, onValueChange = { password = it }, label = { Text(uiLabel("Mot de passe")) }, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            Button(onClick = { connectXtream(server, username, password) { remoteStatus = it } }, enabled = (server.startsWith("https://") || server.startsWith("http://")) && username.isNotBlank() && password.isNotBlank()) { Text(uiLabel("Charger films et séries")) }
-                            Spacer(Modifier.height(12.dp))
-                            Spacer(Modifier.height(12.dp))
-                            Text(uiLabel("Aucun contenu n’est fourni. Les catégories Films et Séries sont détectées à partir des groupes M3U (VOD, Films, Series…). Utilise uniquement des sources autorisées."), color = muted)
+                            Text(uiLabel("Aucun contenu n’est fourni. Ajoute uniquement des sources auxquelles tu as droit. Tu peux en ajouter plusieurs : leurs films et séries sont regroupés."), color = muted)
                                 }
                                 "Langue" -> {
                                     Text(uiLabel("Langue de l'application et des fiches"), color = Color.White, fontSize = 19.sp)
@@ -513,7 +500,7 @@ private fun NovaScreen(channels: List<Channel>, message: String, importPlaylist:
                                     Spacer(Modifier.height(10.dp))
                                     ConfirmButton("Effacer « Reprendre le visionnage »") { recent.clear(); prefs.edit().remove("recent").apply(); dataStatus = "Fait" }
                                     Spacer(Modifier.height(10.dp))
-                                    ConfirmButton("Oublier la source (M3U / Xtream)") { forgetSource(); dataStatus = "Fait" }
+                                    ConfirmButton("Oublier toutes les sources") { forgetSource(); dataStatus = "Fait" }
                                     Spacer(Modifier.height(10.dp))
                                     ConfirmButton("Vider le cache des images") {
                                         context.imageLoader.memoryCache?.clear(); context.imageLoader.diskCache?.clear(); dataStatus = "Fait"
