@@ -108,8 +108,10 @@ class MainActivity : ComponentActivity() {
     private val catalogs = mutableMapOf<String, List<Channel>>()
     private val sessions = mutableStateMapOf<String, XtreamClient>()
     private val statuses = mutableStateMapOf<String, String>()
-    private val channels = mutableStateListOf<Channel>()
-    private val arabic = mutableStateListOf<Channel>()
+    // Immutable lists swapped in one go: a 130k-item SnapshotStateList cleared and refilled on the UI thread froze the app.
+    private var channels by mutableStateOf<List<Channel>>(emptyList())
+    private var arabic by mutableStateOf<List<Channel>>(emptyList())
+    private var rebuildGen = 0
     private var message by mutableStateOf("Ajoute une source Xtream pour commencer")
 
     private fun saveAccounts() {
@@ -132,11 +134,19 @@ class MainActivity : ComponentActivity() {
     }
     private fun hostOf(server: String) = try { Uri.parse(server).host ?: server } catch (e: Exception) { server }
     private fun rebuild() {
-        val merged = accounts.flatMap { a -> catalogs[a.id].orEmpty().filter { !a.frOnly || isFrench(it.group) || isFrench(it.name) } }.distinctBy { "${it.type}|${it.name.lowercase()}" }
-        channels.clear(); channels.addAll(merged)
-        // Arabic content ignores the French-only switch so the "Arabe" tab always shows what the sources hold.
-        arabic.clear(); arabic.addAll(accounts.flatMap { catalogs[it.id].orEmpty() }.filter { isArabicChannel(it) }.distinctBy { "${it.type}|${it.name.lowercase()}" })
-        message = if (accounts.isEmpty()) "Ajoute une source Xtream pour commencer" else "${merged.size} films et séries"
+        // Heavy merge/filter/dedupe runs off the UI thread; only the finished lists are published (latest request wins).
+        val gen = ++rebuildGen
+        val accs = accounts.toList(); val cats = HashMap(catalogs)
+        Thread {
+            val merged = accs.flatMap { a -> cats[a.id].orEmpty().filter { !a.frOnly || isFrench(it.group) || isFrench(it.name) } }.distinctBy { "${it.type}|${it.name.lowercase()}" }
+            // Arabic content ignores the French-only switch so the "Arabe" tab always shows what the sources hold.
+            val ar = accs.flatMap { cats[it.id].orEmpty() }.filter { isArabicChannel(it) }.distinctBy { "${it.type}|${it.name.lowercase()}" }
+            runOnUiThread {
+                if (gen != rebuildGen) return@runOnUiThread
+                channels = merged; arabic = ar
+                message = if (accs.isEmpty()) "Ajoute une source Xtream pour commencer" else "${merged.size} films et séries"
+            }
+        }.start()
     }
     private fun loadAccount(a: XtAccount, onDone: (Boolean, String) -> Unit) {
         statuses[a.id] = "Chargement…"
@@ -448,7 +458,15 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                     shelf = fr.take(18),
                                     films = channels.asSequence().filter { kind(it) == "Films" }.take(18).toList(),
                                     series = channels.asSequence().filter { kind(it) == "Séries" }.take(18).toList(),
-                                    groups = channels.groupBy { it.group }.entries.take(8).map { it.key to it.value.take(18) }
+                                    // First 8 groups only, 18 items each: one cheap pass instead of grouping the whole library.
+                                    groups = run {
+                                        val m = LinkedHashMap<String, ArrayList<Channel>>()
+                                        for (c in channels) {
+                                            val l = m[c.group] ?: if (m.size < 8) ArrayList<Channel>().also { m[c.group] = it } else continue
+                                            if (l.size < 18) l.add(c)
+                                        }
+                                        m.entries.map { it.key to it.value.toList() }
+                                    }
                                 )
                             } }
                             val featured = home.featured
