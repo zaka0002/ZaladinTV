@@ -401,7 +401,9 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                     Spacer(Modifier.height(8.dp))
                     when (page) {
                         "Accueil" -> {
-                            val featured = channels.filter { kind(it) == "Films" || kind(it) == "Séries" }.ifEmpty { channels }.take(8)
+                            // "À la une" only shows the French catalogue, whatever the per-source filter says.
+                            val frCatalog = channels.filter { isFrench(it.group) || isFrench(it.name) }
+                            val featured = frCatalog.filter { kind(it) == "Films" || kind(it) == "Séries" }.take(8)
                             val hero = featured.getOrNull(featuredIndex % featured.size.coerceAtLeast(1))
                             val heroImg = if (hero != null) rememberPoster(hero) else ""
                             if (hero != null) {
@@ -460,7 +462,8 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                 if (recentChannels.isNotEmpty()) {
                                     ChannelShelf("Reprendre le visionnage", recentChannels, favorites, playChannel, toggleFavorite) { search = ""; page = "Recherche" }
                                 }
-                                ChannelShelf("À la une", channels.take(18), favorites, playChannel, toggleFavorite) { search = ""; page = "Recherche" }
+                                val frShelf = channels.filter { isFrench(it.group) || isFrench(it.name) }.take(18)
+                                if (frShelf.isNotEmpty()) ChannelShelf("À la une", frShelf, favorites, playChannel, toggleFavorite) { search = ""; page = "Recherche" }
                                 listOf("Films", "Séries").forEach { type ->
                                     ChannelShelf(type, channels.filter { kind(it) == type }.take(18), favorites, playChannel, toggleFavorite) { page = type }
                                 }
