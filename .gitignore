@@ -1,0 +1,6 @@
+local.properties
+*.apk
+build/
+.gradle/
+.kotlin/
+graphify-out/
