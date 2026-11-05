@@ -808,7 +808,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                         "Menu" -> {
                                             SectionTitle("Onglets du menu")
                                             SettingsCard {
-                                                ToggleRow(uiLabel("Onglet Arabe"), uiLabel("Active les onglets supplémentaires du menu du haut."), arabicTab) {
+                                                ToggleRow(uiLabel("Contenu arabe"), uiLabel("Affiche l'onglet Arabe dans le menu du haut."), arabicTab) {
                                                     arabicTab = !arabicTab; prefs.edit().putBoolean("arabic_tab", arabicTab).apply()
                                                 }
                                             }
