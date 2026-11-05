@@ -547,12 +547,15 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
             Column(Modifier.fillMaxSize().background(bg)) {
                 // Coming up from the content lands on the current tab, not on whichever tab sits above the focused widget.
                 // In Réglages, Down from the tab bar goes straight to the left menu (Bibliothèque, Langue…), not to a control on the right.
-                Row(Modifier.fillMaxWidth().focusProperties { enter = { navSelected } }.focusGroup().onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.background(Brush.verticalGradient(listOf(Color(0xFF101626), bg))).padding(horizontal = 24.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(Modifier.fillMaxWidth().focusProperties { enter = { navSelected } }.focusGroup().onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.background(Brush.verticalGradient(listOf(Color(0xFF101626), bg))).padding(horizontal = 20.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
                     Image(painterResource(R.drawable.zaladin_logo), null, Modifier.height(34.dp).padding(end = 8.dp))
-                    Text(uiLabel("ZALADIN"), fontSize = 19.sp, fontWeight = FontWeight.Black, color = Color.White)
-                    Text(uiLabel("TV"), fontSize = 19.sp, fontWeight = FontWeight.Black, color = accent)
-                    Spacer(Modifier.width(12.dp))
+                    Text(uiLabel("ZALADIN"), fontSize = 17.sp, fontWeight = FontWeight.Black, color = Color.White)
+                    Text(uiLabel("TV"), fontSize = 17.sp, fontWeight = FontWeight.Black, color = accent)
+                    Spacer(Modifier.width(16.dp))
+                    // Glass capsule holding the tabs.
+                    Row(Modifier.clip(RoundedCornerShape(50.dp)).background(Color(0x1AFFFFFF)).border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(50.dp)).padding(3.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                     listOf(
                         Pair("Accueil", Icons.Default.Home),
                         Pair("Films", Icons.Default.Movie),
@@ -563,11 +566,12 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                         Pair("Recherche", Icons.Default.Search),
                         Pair("Réglages", Icons.Default.Settings),
                         Pair("Quitter", Icons.Default.PowerSettingsNew)
-                    ).filter { it.first != "Arabe" || arabicTab }.forEach { (name, icon) ->
-                        NavigationItem(name, icon, page == name, navSelected, if (page == "Réglages") settingsSelected else null) {
-                            if (name == "Quitter") confirmQuit = true else page = name
-                        }
+                    ).filter { it.first != "Quitter" && (it.first != "Arabe" || arabicTab) }.forEach { (name, icon) ->
+                        NavigationItem(name, icon, page == name, navSelected, if (page == "Réglages") settingsSelected else null) { page = name }
                     }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    NavigationItem("Quitter", Icons.Default.PowerSettingsNew, false, navSelected, null) { confirmQuit = true }
                 }
                 if (page == "Films" || page == "Séries") androidx.compose.runtime.key(page) { ExplorePage(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), page == "Séries", favTmdb, toggleFavTmdb, watchDiscover, trailerDiscover) }
                 else if (page == "Arabe" && arabicTab) ArabicPage(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), favTmdb, toggleFavTmdb, watchDiscover, trailerDiscover) {
@@ -872,13 +876,26 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
 @Composable
 private fun NavigationItem(name: String, icon: ImageVector, selected: Boolean, selectedRequester: FocusRequester, downTarget: FocusRequester? = null, onClick: () -> Unit) {
     val shape = RoundedCornerShape(50.dp)
+    val quit = name == "Quitter"
     var focused by remember { mutableStateOf(false) }
-    Row((if (selected) Modifier.focusRequester(selectedRequester) else Modifier).focusProperties { if (downTarget != null) down = downTarget }.scale(if (focused) 1.06f else 1f).background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF2B3D72) else Color.Transparent, shape).onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, uiLabel(name), tint = if (name == "Quitter") Color(0xFFFF7A7A) else if (selected) Color.White else muted, modifier = Modifier.size(if (name == "Quitter") 18.dp else 16.dp))
-        // "Quitter" is icon-only so the nine tabs fit on one line.
-        if (name != "Quitter") {
-            Spacer(Modifier.width(5.dp))
-            Text(uiLabel(name), color = if (selected) Color.White else muted, fontSize = 12.sp, maxLines = 1, softWrap = false)
+    // Selected tab: violet-blue gradient pill. Focused tab: brighter gradient, white ring, slight zoom. Others stay flat.
+    val fill: Brush? = when {
+        quit && focused -> Brush.horizontalGradient(listOf(Color(0xFFE5484D), Color(0xFFB3363B)))
+        focused -> Brush.horizontalGradient(listOf(Color(0xFF8B6CFF), Color(0xFF4C7DFF)))
+        selected -> Brush.horizontalGradient(listOf(Color(0xFF5B45C9), Color(0xFF3A4FA8)))
+        else -> null
+    }
+    Row((if (selected) Modifier.focusRequester(selectedRequester) else Modifier).focusProperties { if (downTarget != null) down = downTarget }
+        .scale(if (focused) 1.07f else 1f).clip(shape)
+        .then(if (fill != null) Modifier.background(fill) else Modifier)
+        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, shape)
+        .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick)
+        .padding(horizontal = if (quit) 10.dp else 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, uiLabel(name), tint = if (quit) (if (focused) Color.White else Color(0xFFFF7A7A)) else if (selected || focused) Color.White else muted, modifier = Modifier.size(if (quit) 20.dp else 17.dp))
+        // "Quitter" is icon-only.
+        if (!quit) {
+            Spacer(Modifier.width(6.dp))
+            Text(uiLabel(name), color = if (selected || focused) Color.White else muted, fontSize = 12.5.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1, softWrap = false)
         }
     }
 }
