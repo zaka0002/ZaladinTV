@@ -552,7 +552,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                     Image(painterResource(R.drawable.zaladin_logo), null, Modifier.height(34.dp).padding(end = 8.dp))
                     Text(uiLabel("ZALADIN"), fontSize = 17.sp, fontWeight = FontWeight.Black, color = Color.White)
                     Text(uiLabel("TV"), fontSize = 17.sp, fontWeight = FontWeight.Black, color = accent)
-                    Spacer(Modifier.width(16.dp))
+                    Spacer(Modifier.width(8.dp))
                     // Glass capsule holding the tabs.
                     Row(Modifier.clip(RoundedCornerShape(50.dp)).background(Color(0x1AFFFFFF)).border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(50.dp)).padding(3.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -570,7 +570,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                         NavigationItem(name, icon, page == name, navSelected, if (page == "Réglages") settingsSelected else null) { page = name }
                     }
                     }
-                    Spacer(Modifier.weight(1f).widthIn(min = 12.dp))
+                    Spacer(Modifier.weight(1f).widthIn(min = 24.dp))
                     val vpnSt by vpn.state.collectAsState()
                     val vpnOn by vpn.enabled.collectAsState()
                     NavVpn(vpnSt is VpnState.On, vpnOn && vpnSt !is VpnState.On && vpnSt !is VpnState.Failed) {
