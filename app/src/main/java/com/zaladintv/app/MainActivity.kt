@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -91,6 +92,10 @@ private fun bestMatch(index: Map<String, List<Channel>>?, type: String, title: S
 private class HomeLists(val featured: List<Channel>, val shelf: List<Channel>, val films: List<Channel>, val series: List<Channel>, val groups: List<Pair<String, List<Channel>>>)
 private val frenchMarker =Regex("(?i)(^|[^a-z])(fr|vf|vff|vfq|vostfr|truefrench|french|france|francais|français)([^a-z]|$)")
 private fun isFrench(text: String) = frenchMarker.containsMatchIn(text)
+private val multiMarker = Regex("(?i)(^|[^a-z])(multi|multilang|multilangue|multilanguage|multilingue)([^a-z]|$)")
+private fun isMulti(text: String) = multiMarker.containsMatchIn(text)
+/** Only French and multi-language titles are kept: other languages are dropped when a catalogue is loaded. */
+private fun keepLang(c: Channel) = isFrench(c.group) || isFrench(c.name) || isMulti(c.group) || isMulti(c.name)
 
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("zaladintv", MODE_PRIVATE) }
@@ -138,9 +143,8 @@ class MainActivity : ComponentActivity() {
         val gen = ++rebuildGen
         val accs = accounts.toList(); val cats = HashMap(catalogs)
         Thread {
-            val merged = accs.flatMap { a -> cats[a.id].orEmpty().filter { !a.frOnly || isFrench(it.group) || isFrench(it.name) } }.distinctBy { "${it.type}|${it.name.lowercase()}" }
-            // Arabic content ignores the French-only switch so the "Arabe" tab always shows what the sources hold.
-            val ar = accs.flatMap { cats[it.id].orEmpty() }.filter { isArabicChannel(it) }.distinctBy { "${it.type}|${it.name.lowercase()}" }
+            val merged = accs.flatMap { a -> cats[a.id].orEmpty() }.distinctBy { "${it.type}|${it.name.lowercase()}" }
+            val ar = emptyList<Channel>()
             runOnUiThread {
                 if (gen != rebuildGen) return@runOnUiThread
                 channels = merged; arabic = ar
@@ -148,12 +152,38 @@ class MainActivity : ComponentActivity() {
             }
         }.start()
     }
+    // Parsed catalogue kept on disk: a launch reads a local file (~1 s) instead of downloading tens of MB of JSON again.
+    private fun cacheFile(id: String) = java.io.File(filesDir, "cat2_$id.tsv")
+    private fun saveCache(id: String, items: List<Channel>) {
+        try {
+            val tmp = java.io.File(filesDir, "cat_$id.tmp")
+            tmp.bufferedWriter().use { w ->
+                for (c in items) {
+                    w.write(listOf(c.name, c.url, c.group, c.logo, c.type, c.seriesId).joinToString("\t") { it.replace('\t', ' ').replace('\n', ' ') })
+                    w.write("\n")
+                }
+            }
+            if (!tmp.renameTo(cacheFile(id))) { cacheFile(id).delete(); tmp.renameTo(cacheFile(id)) }
+        } catch (e: Throwable) { }
+    }
+    private fun readCache(id: String): List<Channel>? = try {
+        val f = cacheFile(id)
+        if (!f.exists()) null else f.bufferedReader().useLines { lines ->
+            lines.mapNotNull { l -> l.split('\t').let { p -> if (p.size >= 6) Channel(p[0], p[1], p[2], p[3], p[4], p[5], src = id) else null } }.toList()
+        }
+    } catch (e: Throwable) { null }
+    private fun cacheFresh(id: String) = cacheFile(id).let { it.exists() && System.currentTimeMillis() - it.lastModified() < 12 * 3600_000L }
+
     private fun loadAccount(a: XtAccount, onDone: (Boolean, String) -> Unit) {
         statuses[a.id] = "Chargement…"
         Thread {
             try {
+                val t0 = android.os.SystemClock.elapsedRealtime()
                 val client = XtreamClient(a.server, a.user, a.pass, a.id)
-                val items = client.loadCatalog()
+                // Language filter applied once here: smaller cache, less memory, faster merges and searches.
+                val items = client.loadCatalog().filter { keepLang(it) }
+                saveCache(a.id, items)
+                android.util.Log.i("ZTV", "catalogue ${a.name}: ${items.size} titres, réseau ${android.os.SystemClock.elapsedRealtime() - t0} ms")
                 runOnUiThread { catalogs[a.id] = items; sessions[a.id] = client; statuses[a.id] = "${items.size} contenus"; rebuild(); onDone(true, "${a.name} : ${items.size} contenus chargés") }
             } catch (e: Throwable) {
                 val why = if (e is OutOfMemoryError) "catalogue trop gros pour la mémoire de la TV" else e.localizedMessage
@@ -183,9 +213,11 @@ class MainActivity : ComponentActivity() {
     }
     private fun removeAccount(id: String) {
         accounts.removeAll { it.id == id }; catalogs.remove(id); sessions.remove(id); statuses.remove(id)
+        cacheFile(id).delete()
         saveAccounts(); rebuild()
     }
     private fun forgetAll() {
+        accounts.forEach { cacheFile(it.id).delete() }
         accounts.clear(); catalogs.clear(); sessions.clear(); statuses.clear()
         saveAccounts(); rebuild()
     }
@@ -198,7 +230,26 @@ class MainActivity : ComponentActivity() {
         appScope.launch { vpn.startIfEnabled() }
         loadAccounts()
         // One account at a time: two big catalogues downloaded together doubled the memory use.
-        fun loadNext(rest: List<XtAccount>) { if (rest.isNotEmpty()) loadAccount(rest.first()) { _, _ -> loadNext(rest.drop(1)) } }
+        val tStart = android.os.SystemClock.elapsedRealtime()
+        // Catalogues cached before the language filter existed hold every language: drop them.
+        filesDir.listFiles { f -> f.name.startsWith("cat_") }?.forEach { it.delete() }
+        fun loadNext(rest: List<XtAccount>) {
+            if (rest.isEmpty()) return
+            val a = rest.first()
+            if (!cacheFresh(a.id)) { loadAccount(a) { _, _ -> loadNext(rest.drop(1)) }; return }
+            // Fresh local copy: show it at once; "Mettre à jour" or a cache older than 12 h downloads again.
+            statuses[a.id] = "Chargement…"
+            Thread {
+                val items = readCache(a.id)
+                runOnUiThread {
+                    if (items.isNullOrEmpty()) { loadAccount(a) { _, _ -> loadNext(rest.drop(1)) }; return@runOnUiThread }
+                    try { sessions[a.id] = XtreamClient(a.server, a.user, a.pass, a.id) } catch (e: Exception) { }
+                    catalogs[a.id] = items; statuses[a.id] = "${items.size} contenus"; rebuild()
+                    android.util.Log.i("ZTV", "catalogue ${a.name}: ${items.size} titres depuis le cache, ${android.os.SystemClock.elapsedRealtime() - tStart} ms après le démarrage")
+                    loadNext(rest.drop(1))
+                }
+            }.start()
+        }
         loadNext(accounts.toList())
         setContent { NovaScreen(vpn, { startVpn() }, appScope, channels, arabic, message, accounts, statuses, sessions, { n, s, u, p, done -> addAccount(n, s, u, p, done) }, { removeAccount(it) }, { toggleFrench(it) }, { refreshAccount(it) }, { forgetAll() }) }
     }
@@ -285,7 +336,15 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
             prefs.edit().putString("recent", recent.joinToString("\n")).apply()
         }
     }
+    // Episodes are fetched in the background as soon as a series is shown, so "Épisodes" / "Regarder" open instantly.
+    val prefetchEpisodes: (Channel) -> Unit = { ch ->
+        if (ch.type == "Séries" && ch.seriesId.isNotBlank()) {
+            val client = xtreams[ch.src]
+            if (client != null) scope.launch(Dispatchers.IO) { try { client.loadEpisodes(ch.seriesId) } catch (e: Exception) { } }
+        }
+    }
     val playChannel: (Channel) -> Unit = { ch ->
+        prefetchEpisodes(ch)
         if (ch.type == "Films" || ch.type == "Séries") {
             detailItem = null; detail = ch; detailInfo = null; detailStatus = "Recherche de la fiche…"
             scope.launch {
@@ -304,7 +363,10 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
         if (panelItem != null) { kotlinx.coroutines.delay(150); try { panelWatchFocus.requestFocus() } catch (e: Exception) { } }
     }
     BackHandler(enabled = panelItem != null && detail == null && playing == null) { panelItem = null }
-    val openDiscover: (TmdbItem) -> Unit = { it -> panelItem = it }
+    val openDiscover: (TmdbItem) -> Unit = { it ->
+        panelItem = it
+        if (it.series) bestMatch(libIndex, "Séries", it.title)?.let { m -> prefetchEpisodes(m) }
+    }
     val watchDiscover: (TmdbItem) -> Unit = { item ->
         val type = if (item.series) "Séries" else "Films"
         val m = bestMatch(libIndex, type, item.title)
@@ -325,7 +387,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
     BackHandler(enabled = playing != null || selectedSeries != null) {
         if (playing != null) playing = null else selectedSeries = null
     }
-    MaterialTheme(colorScheme = darkColorScheme(primary = accent, background = bg, surface = panel)) {
+    MaterialTheme(colorScheme = darkColorScheme(primary = accent, onPrimary = Color(0xFF120D26), background = bg, surface = panel)) {
         if (playing != null) {
             PlayerScreen(playing!!, onBack = { playing = null })
         } else {
@@ -412,8 +474,10 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                 )
             }
             val navSelected = remember { FocusRequester() }
+            val settingsSelected = remember { FocusRequester() }
             Column(Modifier.fillMaxSize().background(bg)) {
                 // Coming up from the content lands on the current tab, not on whichever tab sits above the focused widget.
+                // In Réglages, Down from the tab bar goes straight to the left menu (Bibliothèque, Langue…), not to a control on the right.
                 Row(Modifier.fillMaxWidth().focusProperties { enter = { navSelected } }.focusGroup().onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.background(Brush.verticalGradient(listOf(Color(0xFF101626), bg))).padding(horizontal = 24.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                     Image(painterResource(R.drawable.zaladin_logo), null, Modifier.height(34.dp).padding(end = 8.dp))
@@ -431,7 +495,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                         Pair("Réglages", Icons.Default.Settings),
                         Pair("Quitter", Icons.Default.Close)
                     ).filter { it.first != "Arabe" || arabicTab }.forEach { (name, icon) ->
-                        NavigationItem(name, icon, page == name, navSelected) {
+                        NavigationItem(name, icon, page == name, navSelected, if (page == "Réglages") settingsSelected else null) {
                             if (name == "Quitter") (context as? android.app.Activity)?.finishAffinity() else page = name
                         }
                     }
@@ -539,7 +603,26 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                         "Recherche" -> {
                             TvField(value = search, onValueChange = { search = it }, label = { Text(uiLabel("Rechercher une chaîne, un film ou une série")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                             Spacer(Modifier.height(18.dp))
-                            ChannelGrid(remember(search, channels.size) { channels.asSequence().filter { it.name.contains(search, true) || it.group.contains(search, true) }.take(300).toList() }, favorites, playChannel, toggleFavorite)
+                            // Nothing is listed until the user types: no pre-filled list of random titles.
+                            if (search.isBlank()) Text(uiLabel("Tape le nom d'une chaîne, d'un film ou d'une série."), color = muted, fontSize = 16.sp)
+                            else {
+                                // French films and series only, split in two sections; one early-exit pass over the library.
+                                val results = remember(search, channels) {
+                                    val q = search.trim()
+                                    val f = ArrayList<Channel>(); val sr = ArrayList<Channel>()
+                                    for (c in channels) {
+                                        if (f.size >= 30 && sr.size >= 30) break
+                                        val k = kind(c)
+                                        if (k != "Films" && k != "Séries") continue
+                                        if ((k == "Films" && f.size >= 30) || (k == "Séries" && sr.size >= 30)) continue
+                                        if (!c.name.contains(q, true) && !c.group.contains(q, true)) continue
+                                        if (!keepLang(c)) continue
+                                        if (k == "Films") f.add(c) else sr.add(c)
+                                    }
+                                    f to sr
+                                }
+                                SearchResults(results.first, results.second, favorites, playChannel)
+                            }
                         }
                         "Favoris" -> {
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -564,44 +647,38 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                         "Réglages" -> {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                                 // Sidebar, like Apple TV settings: moving over an entry shows its page.
-                                Column(Modifier.width(230.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Column(Modifier.width(190.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     Text(uiLabel("Réglages"), color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                                     Spacer(Modifier.height(10.dp))
                                     listOf("Bibliothèque" to Icons.Default.VideoLibrary, "Langue" to Icons.Default.Language, "Menu" to Icons.Default.Menu,
                                         "Lecture" to Icons.Default.PlayArrow, "DNS" to Icons.Default.Dns, "VPN" to Icons.Default.VpnKey, "Données" to Icons.Default.Delete, "À propos" to Icons.Default.Info
-                                    ).forEach { (t, ic) -> SideItem(ic, t, settingsTab == t) { settingsTab = t } }
+                                    ).forEach { (t, ic) -> SideItem(ic, t, settingsTab == t, if (settingsTab == t) settingsSelected else null) { settingsTab = t } }
                                 }
                                 Column(Modifier.weight(1f)) {
                                     when (settingsTab) {
                                         "Bibliothèque" -> {
-                                            SectionTitle("Sources")
+                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                                // Two columns so sources, manual entry and the phone QR all fit on one screen.
+                                                Column(Modifier.weight(1.25f)) {
+                                            SectionTitle("Sources  (français + multilangue seulement)")
                                             SettingsCard {
                                                 if (accounts.isEmpty()) Text(uiLabel("Aucune source pour l'instant."), color = muted)
                                                 accounts.forEachIndexed { i, acc ->
                                                     if (i > 0) Spacer(Modifier.height(8.dp))
                                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                                        ToggleRow(acc.name, acc.server + "  •  " + uiLabel(statuses[acc.id] ?: "") + "  •  " + uiLabel("Français seulement"), acc.frOnly, Modifier.weight(1f)) { toggleFr(acc.id) }
+                                                        ToggleRow(acc.name, uiLabel(statuses[acc.id] ?: ""), false, Modifier.weight(1f), showSwitch = false) { }
                                                         PillButton(if (statuses[acc.id] == "Chargement…") "Mise à jour…" else "Mettre à jour") { refreshSource(acc.id) }
                                                         RemoveButton { removeAccount(acc.id) }
                                                     }
                                                 }
                                             }
-                                            Spacer(Modifier.height(10.dp))
-                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                                Column(Modifier.weight(1f)) {
-                                                    SectionTitle("Ajouter avec le téléphone")
-                                                    SettingsCard {
-                                                        PhoneSetupCard("Scanne avec ton téléphone (même Wi-Fi), puis saisis ta source Xtream.") { setStatus ->
-                                                            PhoneSetupServer(onXtream = { n, s, u, pw -> setStatus(uiLabel("Reçu, chargement…")); addAccount(n, s, u, pw) { r -> setStatus(r) } })
-                                                        }
-                                                    }
-                                                }
-                                                Column(Modifier.weight(1f)) {
+                                                    Spacer(Modifier.height(6.dp))
                                                     SectionTitle("Ajout manuel")
                                                     SettingsCard {
-                                                        TvField(value = accName, onValueChange = { accName = it }, label = { Text(uiLabel("Nom (facultatif)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                                                        Spacer(Modifier.height(6.dp))
-                                                        TvField(value = server, onValueChange = { server = it }, label = { Text(uiLabel("Serveur (http://…)")) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                            TvField(value = accName, onValueChange = { accName = it }, label = { Text(uiLabel("Nom (facultatif)")) }, modifier = Modifier.weight(1f), singleLine = true)
+                                                            TvField(value = server, onValueChange = { server = it }, label = { Text(uiLabel("Serveur (http://…)")) }, modifier = Modifier.weight(1f), singleLine = true)
+                                                        }
                                                         Spacer(Modifier.height(6.dp))
                                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                             TvField(value = username, onValueChange = { username = it }, label = { Text(uiLabel("Identifiant")) }, modifier = Modifier.weight(1f), singleLine = true)
@@ -617,10 +694,18 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                                         }, enabled = (server.startsWith("https://") || server.startsWith("http://")) && username.isNotBlank() && password.isNotBlank()) { Text(uiLabel("Ajouter la source")) }
                                                         if (remoteStatus.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(uiLabel(remoteStatus), color = muted, fontSize = 13.sp) }
                                                     }
+                                                    Spacer(Modifier.height(6.dp))
+                                                    Text(uiLabel(message) + "  •  " + uiLabel("Ajoute uniquement des sources auxquelles tu as droit."), color = muted, fontSize = 12.sp)
+                                                }
+                                                Column(Modifier.weight(0.75f)) {
+                                                    SectionTitle("Ajouter avec le téléphone")
+                                                    SettingsCard {
+                                                        PhoneSetupCard("Scanne avec ton téléphone (même Wi-Fi), puis saisis ta source Xtream.") { setStatus ->
+                                                            PhoneSetupServer(onXtream = { n, s, u, pw -> setStatus(uiLabel("Reçu, chargement…")); addAccount(n, s, u, pw) { r -> setStatus(r) } })
+                                                        }
+                                                    }
                                                 }
                                             }
-                                            Spacer(Modifier.height(8.dp))
-                                            Text(uiLabel(message) + "  •  " + uiLabel("Ajoute uniquement des sources auxquelles tu as droit."), color = muted, fontSize = 12.sp)
                                         }
                                         "Langue" -> {
                                             SectionTitle("Langue de l'application et des fiches")
@@ -700,10 +785,10 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
 }
 
 @Composable
-private fun NavigationItem(name: String, icon: ImageVector, selected: Boolean, selectedRequester: FocusRequester, onClick: () -> Unit) {
+private fun NavigationItem(name: String, icon: ImageVector, selected: Boolean, selectedRequester: FocusRequester, downTarget: FocusRequester? = null, onClick: () -> Unit) {
     val shape = RoundedCornerShape(50.dp)
     var focused by remember { mutableStateOf(false) }
-    Row((if (selected) Modifier.focusRequester(selectedRequester) else Modifier).scale(if (focused) 1.06f else 1f).background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF2B3D72) else Color.Transparent, shape).onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row((if (selected) Modifier.focusRequester(selectedRequester) else Modifier).focusProperties { if (downTarget != null) down = downTarget }.scale(if (focused) 1.06f else 1f).background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF2B3D72) else Color.Transparent, shape).onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, uiLabel(name), tint = if (selected) Color.White else muted, modifier = Modifier.size(16.dp))
         // "Quitter" is icon-only so the nine tabs fit on one line.
         if (name != "Quitter") {
@@ -777,6 +862,39 @@ private fun ChannelShelf(title: String, channels: List<Channel>, favorites: List
     Spacer(Modifier.height(25.dp))
 }
 
+/** Search results as classic portrait posters, Films then Séries. */
+@Composable
+private fun SearchResults(films: List<Channel>, series: List<Channel>, favorites: List<String>, onPlay: (Channel) -> Unit) {
+    if (films.isEmpty() && series.isEmpty()) { Text(uiLabel("Aucun résultat en français."), color = muted, fontSize = 16.sp); return }
+    val cols = 6
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.heightIn(max = 700.dp)) {
+        listOf("Films" to films, "Séries" to series).forEach { (title, list) ->
+            if (list.isEmpty()) return@forEach
+            item(key = "h-$title") { Text(uiLabel(title) + "  (${list.size})", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold) }
+            items(list.chunked(cols), key = { row -> title + "|" + row.first().url }) { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.fillMaxWidth()) {
+                    row.forEach { channel ->
+                        var focused by remember { mutableStateOf(false) }
+                        val poster = rememberPoster(channel)
+                        Box(Modifier.weight(1f).aspectRatio(2f / 3f).scale(if (focused) 1.05f else 1f).clip(RoundedCornerShape(12.dp))
+                            .background(Brush.linearGradient(listOf(Color(0xFF433A72), Color(0xFF204263))))
+                            .border(if (focused) 3.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(12.dp))
+                            .onFocusChanged { focused = it.isFocused }.clickable { onPlay(channel) }) {
+                            if (poster.startsWith("https://", true)) AsyncImage(model = poster, contentDescription = channel.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                            // Title on a dark fade at the bottom, like the posters of the Films and Séries pages.
+                            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6050810)))).padding(horizontal = 8.dp, vertical = 8.dp)) {
+                                Text(TmdbClient.cleanTitle(channel.name).first.ifBlank { channel.name }, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                            if (favorites.contains(channel.url)) Icon(Icons.Default.Favorite, null, tint = accent, modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(20.dp))
+                        }
+                    }
+                    repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ChannelGrid(channels: List<Channel>, favorites: List<String>, onPlay: (Channel) -> Unit, onFavorite: (Channel) -> Unit) {
     if (channels.isEmpty()) { Text(uiLabel("Aucune chaîne à afficher."), color = muted); return }
@@ -820,7 +938,7 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
     val prefs = remember { context.getSharedPreferences("zaladintv", Activity.MODE_PRIVATE) }
     val posKey = "pos_${channel.url.hashCode()}"
     val player = remember(channel.url) {
-        ExoPlayer.Builder(context).setMediaSourceFactory(
+        ExoPlayer.Builder(context).setSeekBackIncrementMs(10_000L).setSeekForwardIncrementMs(10_000L).setMediaSourceFactory(
             androidx.media3.exoplayer.source.DefaultMediaSourceFactory(androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(Net.client))
         ).build().apply {
             val saved = if (prefs.getBoolean("resume", true)) prefs.getLong(posKey, 0L) else 0L
@@ -857,11 +975,48 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
     val skipFocus = remember { FocusRequester() }
     LaunchedEffect(inIntro) { if (inIntro) try { skipFocus.requestFocus() } catch (e: Exception) { } }
     DisposableEffect(player) { onDispose { savePosition(); player.release() } }
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(factory = { PlayerView(it).apply { this.player = player; useController = true; layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT) } }, modifier = Modifier.fillMaxSize())
+    var playerView by remember { mutableStateOf<PlayerView?>(null) }
+    val playerRoot = remember { FocusRequester() }
+    // The title/back strip follows the control bar: visible with it, hidden while just watching.
+    var controlsVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) { delay(300); try { playerRoot.requestFocus() } catch (e: Exception) { } }
+    // Remote control handled here, whatever holds the focus: OK = play/pause, Left/Right = -/+ 10 s, Up/Down = show the bar.
+    Box(Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { e ->
+        if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        val ok = e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter
+        if (inIntro && ok) return@onPreviewKeyEvent false
+        fun seek(delta: Long) {
+            val dur = player.duration
+            val target = (player.currentPosition + delta).coerceAtLeast(0L)
+            player.seekTo(if (dur > 0) target.coerceAtMost(dur - 1000L) else target)
+        }
+        when {
+            ok || e.key == Key.MediaPlayPause -> { if (player.isPlaying) player.pause() else player.play(); playerView?.showController(); true }
+            e.key == Key.MediaPlay -> { player.play(); playerView?.showController(); true }
+            e.key == Key.MediaPause -> { player.pause(); playerView?.showController(); true }
+            e.key == Key.DirectionLeft || e.key == Key.MediaRewind -> { seek(-10_000L); playerView?.showController(); true }
+            e.key == Key.DirectionRight || e.key == Key.MediaFastForward -> { seek(10_000L); playerView?.showController(); true }
+            e.key == Key.DirectionUp || e.key == Key.DirectionDown -> { playerView?.showController(); true }
+            else -> false
+        }
+    }.focusRequester(playerRoot).focusable()) {
+        // PlayerView draws the bar (play/pause, ±10 s, seek bar, times); the keys above drive it.
+        AndroidView(factory = {
+            PlayerView(it).apply {
+                playerView = this
+                setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { v -> controlsVisible = v == android.view.View.VISIBLE })
+                this.player = player; useController = true
+                controllerShowTimeoutMs = 4000; controllerHideOnTouch = true
+                setShowRewindButton(true); setShowFastForwardButton(true)
+                setShowPreviousButton(false); setShowNextButton(false)
+                isFocusable = false; isFocusableInTouchMode = false
+                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                post { showController() }
+            }
+        }, modifier = Modifier.fillMaxSize())
         if (inIntro) Button(onClick = { intro?.let { player.seekTo(it.second) }; inIntro = false },
             modifier = Modifier.align(Alignment.BottomEnd).padding(48.dp).focusRequester(skipFocus)) { Text(uiLabel("Passer l'intro")) }
-        Row(Modifier.align(Alignment.TopStart).background(Color(0xB9000000)).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (controlsVisible) Row(Modifier.align(Alignment.TopStart).background(Color(0xB9000000)).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) { Text(uiLabel("← Retour")) }
             Text(channel.name, color = Color.White)
         }
@@ -982,8 +1137,15 @@ private fun openYoutube(context: android.content.Context, key: String): Boolean 
 @Composable
 private fun ConfirmButton(label: String, onConfirm: () -> Unit) {
     var armed by remember { mutableStateOf(false) }
-    Button(onClick = { if (armed) { armed = false; onConfirm() } else armed = true },
-        modifier = Modifier.onFocusChanged { if (!it.isFocused) armed = false }) { Text(uiLabel(if (armed) "Confirmer ?" else label)) }
+    var focused by remember { mutableStateOf(false) }
+    // Same look as the other settings buttons: dark pill, white text, clear focus ring, red once armed.
+    Text(uiLabel(if (armed) "Confirmer ?" else label), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .background(if (armed) Color(0xFFD64545) else if (focused) Color(0xFF3B4F8F) else Color(0xFF2A3047))
+            .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
+            .onFocusChanged { focused = it.isFocused; if (!it.isFocused) armed = false }
+            .clickable { if (armed) { armed = false; onConfirm() } else armed = true }
+            .padding(horizontal = 18.dp, vertical = 14.dp))
 }
 
 @Composable
@@ -1023,9 +1185,9 @@ private fun SettingsCard(content: @Composable androidx.compose.foundation.layout
 }
 
 @Composable
-private fun SideItem(icon: ImageVector, label: String, selected: Boolean, onSelect: () -> Unit) {
+private fun SideItem(icon: ImageVector, label: String, selected: Boolean, requester: FocusRequester? = null, onSelect: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+    Row((if (requester != null) Modifier.focusRequester(requester) else Modifier).fillMaxWidth().clip(RoundedCornerShape(14.dp))
         .background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF232C45) else Color.Transparent)
         .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
         .onFocusChanged { focused = it.isFocused; if (it.isFocused) onSelect() }.clickable(onClick = onSelect)
@@ -1038,7 +1200,7 @@ private fun SideItem(icon: ImageVector, label: String, selected: Boolean, onSele
 
 /** One focus target per row (like Apple TV): press OK anywhere on the row to flip the switch. */
 @Composable
-private fun ToggleRow(title: String, subtitle: String, checked: Boolean, modifier: Modifier = Modifier, showSwitch: Boolean = true, onToggle: () -> Unit) {
+private fun ToggleRow(title: String, subtitle: String, checked: Boolean, modifier: Modifier = Modifier, showSwitch: Boolean = true, subtitleLines: Int = 1, onToggle: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     Row(modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
         .background(if (focused) Color(0xFF2B3552) else Color(0xFF1C2232))
@@ -1047,7 +1209,7 @@ private fun ToggleRow(title: String, subtitle: String, checked: Boolean, modifie
         verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (subtitle.isNotBlank()) Text(subtitle, color = muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (subtitle.isNotBlank()) Text(subtitle, color = muted, fontSize = 12.sp, maxLines = subtitleLines, overflow = TextOverflow.Ellipsis)
         }
         if (showSwitch) {
             Spacer(Modifier.width(12.dp))
@@ -1074,13 +1236,13 @@ private fun CheckRow(title: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun PillButton(label: String, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    Text(uiLabel(label), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+    Text(uiLabel(label), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(RoundedCornerShape(50.dp))
             .background(if (focused) Color(0xFF3B4F8F) else Color(0xFF2B3D72))
             .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(50.dp))
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 12.dp))
+            .padding(horizontal = 14.dp, vertical = 8.dp))
 }
 
 /** Two presses: the first one asks for confirmation, so a source can't be removed by a stray OK. */
@@ -1088,13 +1250,13 @@ private fun PillButton(label: String, onClick: () -> Unit) {
 private fun RemoveButton(onRemove: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     var armed by remember { mutableStateOf(false) }
-    Text(uiLabel(if (armed) "Confirmer ?" else "Supprimer"), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+    Text(uiLabel(if (armed) "Confirmer ?" else "Supprimer"), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(RoundedCornerShape(50.dp))
             .background(if (armed) Color(0xFFD64545) else if (focused) Color(0xFF3B4F8F) else Color(0xFF2A3047))
             .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(50.dp))
             .onFocusChanged { focused = it.isFocused; if (!it.isFocused) armed = false }
             .clickable { if (armed) { armed = false; onRemove() } else armed = true }
-            .padding(horizontal = 18.dp, vertical = 12.dp))
+            .padding(horizontal = 14.dp, vertical = 8.dp))
 }
 
 /** Settings > VPN: switch, country, public address check, and the QR code to send the WireGuard key from a phone. */

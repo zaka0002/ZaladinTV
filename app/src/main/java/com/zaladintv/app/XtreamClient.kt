@@ -79,8 +79,21 @@ class XtreamClient(private val server: String, private val user: String, private
         add("get_series", "get_series_categories", "Séries")
         return result
     }
+    companion object {
+        // Episodes of a series kept for 30 minutes: reopening it, or opening it after the background prefetch, is instant.
+        private val epCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Channel>>>()
+    }
     fun loadEpisodes(seriesId: String): List<Channel> {
         require(seriesId.all { it.isDigit() }) { "Identifiant de série invalide" }
+        val key = "$root|$user|$seriesId"
+        epCache[key]?.let { if (System.currentTimeMillis() - it.first < 30 * 60_000L) return it.second }
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        val list = fetchEpisodes(seriesId)
+        android.util.Log.i("ZTV", "épisodes série $seriesId: ${list.size} en ${android.os.SystemClock.elapsedRealtime() - t0} ms")
+        if (list.isNotEmpty()) epCache[key] = System.currentTimeMillis() to list
+        return list
+    }
+    private fun fetchEpisodes(seriesId: String): List<Channel> {
         val info = JSONObject(fetch(api("get_series_info", "&series_id=$seriesId")))
         // Servers return "episodes" as an object keyed by season, or as an array of seasons: accept both so no season is lost.
         val bySeason = LinkedHashMap<String, JSONArray>()
@@ -99,10 +112,7 @@ class XtreamClient(private val server: String, private val user: String, private
                 output.add(Channel("Saison $season • $title", "$root/series/${enc(user)}/${enc(password)}/$id.$ext", "Saison $season", type = "Épisode", season = season.toIntOrNull() ?: 0, episode = item.optInt("episode_num", i + 1)))
             }
         }
-        return output.sortedWith(compareBy<Channel>(
-            { it.group.substringAfter("Saison ").toIntOrNull() ?: Int.MAX_VALUE },
-            { Regex("(?:[Ee]pisode|[Ee]p\\.?)[^0-9]*([0-9]+)").find(it.name)?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE },
-            { it.name }
-        ))
+        // Season and episode numbers are already on each item: no per-comparison regex.
+        return output.sortedWith(compareBy<Channel>({ if (it.season > 0) it.season else Int.MAX_VALUE }, { if (it.episode > 0) it.episode else Int.MAX_VALUE }, { it.name }))
     }
 }

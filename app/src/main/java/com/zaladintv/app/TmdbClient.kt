@@ -23,18 +23,29 @@ object TmdbClient {
 
     private fun img(size: String, p: String) = if (p.isBlank() || p == "null") "" else "https://image.tmdb.org/t/p/$size$p"
 
+    // Answers kept 15 minutes in memory: coming back to a page or a filter no longer waits for the network.
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, JSONObject>>()
+
     private fun get(path: String, lang: String = Lang.tmdb): JSONObject {
         require(key.isNotBlank()) { "Clé TMDB absente (tmdb.key dans local.properties)" }
+        val ck = "$lang|$path"
+        cache[ck]?.let { if (System.currentTimeMillis() - it.first < 15 * 60_000L) return it.second }
         val sep = if (path.contains('?')) "&" else "?"
         Net.get("$BASE/$path${sep}api_key=${URLEncoder.encode(key, "UTF-8")}&language=$lang", 10_000, 15_000).use { r ->
             require(r.isSuccessful) { if (r.code == 401) "Clé TMDB invalide" else "TMDB HTTP ${r.code}" }
-            return JSONObject(r.body?.string().orEmpty())
+            val o = JSONObject(r.body?.string().orEmpty())
+            if (cache.size > 400) cache.clear()
+            cache[ck] = System.currentTimeMillis() to o
+            return o
         }
     }
 
+    // Provider tags written between bars or brackets: "|FR| ", "||FR|| ", "[MULTI] ", "|SERIES| |4K| ".
+    private val langTag = Regex("""(?i)^\s*(?:[|\[]+\s*(?:fr|vf|vff|vfq|vo|vostfr|en|ar|multi|uk|us|de|es|it|nl|pt|tr|pl|ru|ca|be|ch|vod|series|4k|uhd|fhd|hd|sd)\s*[|\]]+\s*)+""")
+
     fun cleanTitle(name: String): Pair<String, String?> {
         val year = Regex("""\((19|20)\d{2}\)""").find(name)?.value?.trim('(', ')')
-        val t = name.replace(prefix, "").replace(junk, " ").replace(Regex("""\s+"""), " ").trim(' ', '-', '|')
+        val t = name.replace(langTag, "").replace(prefix, "").replace(junk, " ").replace(Regex("""\s+"""), " ").trim(' ', '-', '|')
         return t to year
     }
 
