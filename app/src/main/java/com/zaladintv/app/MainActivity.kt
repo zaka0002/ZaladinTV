@@ -606,13 +606,12 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                 if (featured.size > 1) { delay(8_000); featuredIndex = (featuredIndex + 1) % featured.size }
                             }
                             val hero = featured.getOrNull(featuredIndex % featured.size.coerceAtLeast(1))
-                            // Each change fades and zooms the card in softly instead of cutting.
+                            // The card itself never dims (that flashed dark): only its text and poster slide in and fade.
                             val heroAnim = remember { androidx.compose.animation.core.Animatable(1f) }
                             LaunchedEffect(featuredIndex) { heroAnim.snapTo(0f); heroAnim.animateTo(1f, androidx.compose.animation.core.tween(700)) }
                             val heroImg = if (hero != null) rememberPoster(hero) else ""
                             if (hero != null) {
-                            Box(Modifier.fillMaxWidth().height(260.dp).graphicsLayer { val a = heroAnim.value; alpha = 0.25f + 0.75f * a; scaleX = 0.97f + 0.03f * a; scaleY = 0.97f + 0.03f * a }
-                                .onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.clip(RoundedCornerShape(22.dp))
+                            Box(Modifier.fillMaxWidth().height(260.dp).onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.clip(RoundedCornerShape(22.dp))
                                 .background(Brush.horizontalGradient(listOf(Color(0xFF392358), Color(0xFF172744), Color(0xFF0C1220))))) {
                                 if (heroImg.startsWith("https://", true)) {
                                     // Faint backdrop with a dark fade from the left so the text stays readable.
@@ -621,6 +620,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                 }
                                 // The poster slot is always drawn, so changing title with the arrows never makes the layout jump.
                                 Box(Modifier.align(Alignment.CenterEnd).padding(end = 190.dp).width(150.dp).height(225.dp)
+                                    .graphicsLayer { val a = heroAnim.value; alpha = 0.2f + 0.8f * a; translationX = (1f - a) * 40f }
                                     .clip(RoundedCornerShape(12.dp)).background(Brush.linearGradient(listOf(Color(0xFF433A72), Color(0xFF204263))))
                                     .border(2.dp, Color(0x66FFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
                                     if (heroImg.startsWith("https://", true)) AsyncImage(model = heroImg, contentDescription = hero.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
@@ -628,7 +628,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                 }
                                 Box(Modifier.align(Alignment.CenterEnd).size(270.dp)
                                     .background(Brush.radialGradient(listOf(Color(0x665D53B8), Color.Transparent))))
-                                Column(Modifier.align(Alignment.CenterStart).fillMaxWidth(0.62f).padding(32.dp)) {
+                                Column(Modifier.align(Alignment.CenterStart).fillMaxWidth(0.62f).graphicsLayer { val a = heroAnim.value; alpha = 0.2f + 0.8f * a; translationX = (1f - a) * -40f }.padding(32.dp)) {
                                     Text(uiLabel("ZALADINTV  /  À LA UNE"), color = Color(0xFFC8B6FF), fontSize = 12.sp, letterSpacing = 2.sp)
                                     Spacer(Modifier.height(13.dp))
                                     Text(hero?.name ?: uiLabel("Bienvenue dans ZaladinTV"), color = Color.White,
