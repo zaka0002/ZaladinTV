@@ -61,7 +61,7 @@ private val en = mapOf(
     "Reçu, chargement…" to "Received, loading…", "Pas de réseau local détecté. Connecte la TV au Wi-Fi." to "No local network found. Connect the TV to Wi-Fi.",
     "C'est envoyé à la TV. Tu peux fermer cette page." to "Sent to the TV. You can close this page.", "Lien invalide : il doit commencer par http:// ou https://" to "Invalid link: it must start with http:// or https://",
     "Playlist M3U (lien http ou https)" to "M3U playlist (http or https link)", "Importer une playlist (lien http ou https)" to "Import a playlist (http or https link)", "Serveur (ex. http://monserveur.example:8080)" to "Server (e.g. http://myserver.example:8080)", "Adresse du serveur invalide (http:// ou https://)" to "Invalid server address (http:// or https://)", "Utilise une URL http:// ou https://" to "Use an http:// or https:// URL", "Source Xtream autorisée" to "Authorised Xtream source", "Envoyer à la TV" to "Send to the TV",
-     "Synopsis" to "Synopsis", "Quitter" to "Quit", "Thriller / Mystère" to "Thriller / Mystery", "Mieux notés" to "Top rated", "Récents" to "Recent",
+     "Synopsis" to "Synopsis", "Quitter" to "Quit", "Quitter ZaladinTV ?" to "Quit ZaladinTV?", "L'application va se fermer." to "The app will close.", "Annuler" to "Cancel", "Thriller / Mystère" to "Thriller / Mystery", "Mieux notés" to "Top rated", "Récents" to "Recent",
     "Tous les genres" to "All genres", "Fantastique" to "Fantasy", "Sélectionne une affiche" to "Select a poster",
     "Genres" to "Genres", "Réalisation" to "Directors", "Création" to "Created by", "Distribution" to "Cast",
     "Retour : fermer   •   OK maintenu : favori" to "Back: close   •   Hold OK: favorite", "Confirmer ?" to "Confirm?", "Fait" to "Done", "Licence MIT" to "MIT license",

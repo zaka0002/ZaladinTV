@@ -263,6 +263,20 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
     val prefs = remember { context.getSharedPreferences("zaladintv", Activity.MODE_PRIVATE) }
     val favorites = remember { mutableStateListOf<String>().apply { addAll(prefs.getStringSet("favorites", emptySet()) ?: emptySet()) } }
     var page by remember { mutableStateOf("Accueil") }
+    var confirmQuit by remember { mutableStateOf(false) }
+    // Back from any other page returns to Accueil; on Accueil it asks before leaving. Panels and the player register later, so they win.
+    BackHandler(enabled = page != "Accueil") { page = "Accueil" }
+    BackHandler(enabled = page == "Accueil" && !confirmQuit) { confirmQuit = true }
+    if (confirmQuit) {
+        val stay = remember { FocusRequester() }
+        LaunchedEffect(Unit) { delay(150); try { stay.requestFocus() } catch (e: Exception) { } }
+        AlertDialog(onDismissRequest = { confirmQuit = false },
+            icon = { Icon(Icons.Default.PowerSettingsNew, null, tint = Color(0xFFFF7A7A)) },
+            title = { Text(uiLabel("Quitter ZaladinTV ?")) },
+            text = { Text(uiLabel("L'application va se fermer.")) },
+            confirmButton = { TextButton(onClick = { confirmQuit = false; (context as? android.app.Activity)?.finishAffinity() }) { Text(uiLabel("Quitter"), color = Color(0xFFFF7A7A)) } },
+            dismissButton = { TextButton(onClick = { confirmQuit = false }, modifier = Modifier.focusRequester(stay)) { Text(uiLabel("Annuler")) } })
+    }
     var featuredIndex by remember { mutableIntStateOf(0) }
     var search by remember { mutableStateOf("") }
     var accName by remember { mutableStateOf("") }
@@ -493,10 +507,10 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                         Pair("Favoris", Icons.Default.Favorite),
                         Pair("Recherche", Icons.Default.Search),
                         Pair("Réglages", Icons.Default.Settings),
-                        Pair("Quitter", Icons.Default.Close)
+                        Pair("Quitter", Icons.Default.PowerSettingsNew)
                     ).filter { it.first != "Arabe" || arabicTab }.forEach { (name, icon) ->
                         NavigationItem(name, icon, page == name, navSelected, if (page == "Réglages") settingsSelected else null) {
-                            if (name == "Quitter") (context as? android.app.Activity)?.finishAffinity() else page = name
+                            if (name == "Quitter") confirmQuit = true else page = name
                         }
                     }
                 }
@@ -789,7 +803,7 @@ private fun NavigationItem(name: String, icon: ImageVector, selected: Boolean, s
     val shape = RoundedCornerShape(50.dp)
     var focused by remember { mutableStateOf(false) }
     Row((if (selected) Modifier.focusRequester(selectedRequester) else Modifier).focusProperties { if (downTarget != null) down = downTarget }.scale(if (focused) 1.06f else 1f).background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF2B3D72) else Color.Transparent, shape).onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, uiLabel(name), tint = if (selected) Color.White else muted, modifier = Modifier.size(16.dp))
+        Icon(icon, uiLabel(name), tint = if (name == "Quitter") Color(0xFFFF7A7A) else if (selected) Color.White else muted, modifier = Modifier.size(if (name == "Quitter") 18.dp else 16.dp))
         // "Quitter" is icon-only so the nine tabs fit on one line.
         if (name != "Quitter") {
             Spacer(Modifier.width(5.dp))
