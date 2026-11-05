@@ -623,7 +623,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                             LaunchedEffect(featuredIndex) { heroAnim.snapTo(0f); heroAnim.animateTo(1f, androidx.compose.animation.core.tween(700)) }
                             val heroImg = if (hero != null) rememberPoster(hero) else ""
                             if (hero != null) {
-                            Box(Modifier.fillMaxWidth().height(260.dp).onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.clip(RoundedCornerShape(22.dp))
+                            Box(Modifier.fillMaxWidth().height(290.dp).onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.clip(RoundedCornerShape(22.dp))
                                 .background(Brush.horizontalGradient(listOf(Color(0xFF392358), Color(0xFF172744), Color(0xFF0C1220))))) {
                                 if (heroImg.startsWith("https://", true)) {
                                     // Faint backdrop with a dark fade from the left so the text stays readable.
@@ -640,14 +640,15 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                 }
                                 Box(Modifier.align(Alignment.CenterEnd).size(270.dp)
                                     .background(Brush.radialGradient(listOf(Color(0x665D53B8), Color.Transparent))))
-                                Column(Modifier.align(Alignment.CenterStart).fillMaxWidth(0.62f).graphicsLayer { val a = heroAnim.value; alpha = 0.2f + 0.8f * a; translationX = (1f - a) * -40f }.padding(32.dp)) {
-                                    Text(uiLabel("ZALADINTV  /  À LA UNE"), color = Color(0xFFC8B6FF), fontSize = 12.sp, letterSpacing = 2.sp)
-                                    Spacer(Modifier.height(13.dp))
-                                    Text(hero?.name ?: uiLabel("Bienvenue dans ZaladinTV"), color = Color.White,
-                                        fontSize = 28.sp, lineHeight = 32.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    Spacer(Modifier.height(12.dp))
-                                    Text(hero?.group ?: uiLabel("Films, séries et chaînes depuis tes sources autorisées"), color = Color(0xFFCED3E7), fontSize = 15.sp)
-                                    Spacer(Modifier.height(22.dp))
+                                Column(Modifier.align(Alignment.CenterStart).fillMaxWidth(0.62f).graphicsLayer { val a = heroAnim.value; alpha = 0.2f + 0.8f * a; translationX = (1f - a) * -40f }.padding(start = 32.dp, end = 24.dp, top = 22.dp, bottom = 46.dp)) {
+                                    // Long titles wrap on two lines; the bottom padding keeps the buttons clear of the position dots.
+                                    Text(uiLabel("À LA UNE"), color = Color(0xFFC8B6FF), fontSize = 12.sp, letterSpacing = 2.sp)
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(hero?.let { TmdbClient.cleanTitle(it.name).first.ifBlank { it.name } } ?: uiLabel("Bienvenue dans ZaladinTV"), color = Color.White,
+                                        fontSize = 26.sp, lineHeight = 30.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(hero?.group ?: uiLabel("Films, séries et chaînes depuis tes sources autorisées"), color = Color(0xFFCED3E7), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Spacer(Modifier.height(14.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                         GradientButton(if (hero != null) "Regarder" else "Ajouter une source", if (hero != null) Icons.Default.PlayArrow else Icons.Default.Add) { if (hero != null) playChannel(hero) else page = "Réglages" }
                                         if (hero != null) {
