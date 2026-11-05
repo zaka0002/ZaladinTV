@@ -570,13 +570,13 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                         NavigationItem(name, icon, page == name, navSelected, if (page == "Réglages") settingsSelected else null) { page = name }
                     }
                     }
-                    Spacer(Modifier.weight(1f).widthIn(min = 24.dp))
+                    Spacer(Modifier.width(10.dp))
                     val vpnSt by vpn.state.collectAsState()
                     val vpnOn by vpn.enabled.collectAsState()
                     NavVpn(vpnSt is VpnState.On, vpnOn && vpnSt !is VpnState.On && vpnSt !is VpnState.Failed) {
                         if (vpnOn) { vpn.setEnabled(false); scope.launch { vpn.disconnect() } } else { vpn.setEnabled(true); startVpn() }
                     }
-                    Spacer(Modifier.width(0.dp))
+                    Spacer(Modifier.width(4.dp))
                     NavigationItem("Quitter", Icons.Default.PowerSettingsNew, false, navSelected, null) { confirmQuit = true }
                 }
                 if (page == "Films" || page == "Séries") androidx.compose.runtime.key(page) { ExplorePage(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), page == "Séries", favTmdb, toggleFavTmdb, watchDiscover, trailerDiscover) }
@@ -905,7 +905,7 @@ private fun NavigationItem(name: String, icon: ImageVector, selected: Boolean, s
         .then(if (fill != null) Modifier.background(fill) else Modifier)
         .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, shape)
         .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick)
-        .padding(horizontal = if (quit) 6.dp else 5.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        .padding(horizontal = if (quit) 9.dp else 5.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, uiLabel(name), tint = if (quit) (if (focused) Color.White else Color(0xFFFF7A7A)) else if (selected || focused) Color.White else muted, modifier = Modifier.size(if (quit) 20.dp else 17.dp))
         // "Quitter" is icon-only.
         if (!quit) {
