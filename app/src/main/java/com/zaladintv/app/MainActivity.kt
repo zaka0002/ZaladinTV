@@ -286,24 +286,27 @@ class MainActivity : ComponentActivity() {
         val tStart = android.os.SystemClock.elapsedRealtime()
         // Catalogues cached before the language filter existed hold every language: drop them.
         filesDir.listFiles { f -> f.name.startsWith("cat_") }?.forEach { it.delete() }
-        fun loadNext(rest: List<XtAccount>) {
+        // Every launch: the saved copy is shown at once (fast start), then each source is downloaded again in the background
+        // and swapped in when ready. A failed refresh keeps the saved copy on screen.
+        fun refreshNext(rest: List<XtAccount>) {
             if (rest.isEmpty()) return
-            val a = rest.first()
-            if (!cacheFresh(a.id)) { loadAccount(a) { _, _ -> loadNext(rest.drop(1)) }; return }
-            // Fresh local copy: show it at once; "Mettre à jour" or a cache older than 12 h downloads again.
-            statuses[a.id] = "Chargement…"
-            Thread {
-                val items = readCache(a.id)
-                runOnUiThread {
-                    if (items.isNullOrEmpty()) { loadAccount(a) { _, _ -> loadNext(rest.drop(1)) }; return@runOnUiThread }
-                    try { sessions[a.id] = XtreamClient(a.server, a.user, a.pass, a.id) } catch (e: Exception) { }
-                    catalogs[a.id] = items; statuses[a.id] = "${items.size} contenus"; rebuild()
-                    android.util.Log.i("ZTV", "catalogue ${a.name}: ${items.size} titres depuis le cache, ${android.os.SystemClock.elapsedRealtime() - tStart} ms après le démarrage")
-                    loadNext(rest.drop(1))
-                }
-            }.start()
+            loadAccount(rest.first()) { _, _ -> refreshNext(rest.drop(1)) }
         }
-        loadNext(accounts.toList())
+        val startAccounts = accounts.toList()
+        Thread {
+            val saved = startAccounts.associate { it.id to readCache(it.id) }
+            runOnUiThread {
+                for (a in startAccounts) {
+                    val items = saved[a.id]
+                    if (items.isNullOrEmpty()) continue
+                    catalogs[a.id] = items; statuses[a.id] = "${items.size} contenus"
+                    try { sessions[a.id] = XtreamClient(a.server, a.user, a.pass, a.id) } catch (e: Exception) { }
+                }
+                rebuild()
+                android.util.Log.i("ZTV", "catalogues depuis le cache: ${saved.values.sumOf { it?.size ?: 0 }} titres, ${android.os.SystemClock.elapsedRealtime() - tStart} ms après le démarrage")
+                refreshNext(startAccounts)
+            }
+        }.start()
         setContent { NovaScreen(vpn, { startVpn() }, appScope, channels, arabic, message, accounts, statuses, sessions, { n, s, u, p, done -> addAccount(n, s, u, p, done) }, { removeAccount(it) }, { toggleFrench(it) }, { refreshAccount(it) }, { forgetAll() }) }
     }
 }
