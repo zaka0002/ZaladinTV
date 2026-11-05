@@ -155,7 +155,7 @@ class CatalogWorker(ctx: android.content.Context, params: androidx.work.WorkerPa
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("zaladintv", MODE_PRIVATE) }
     private val appScope = kotlinx.coroutines.MainScope()
-    private val vpn by lazy { Vpn(applicationContext, ProtonServers(applicationContext, Net.client)) }
+    private val vpn by lazy { Vpn(applicationContext, Net.client) }
     private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         if (r.resultCode == RESULT_OK) appScope.launch { vpn.connect() }
     }
@@ -571,6 +571,12 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                     }
                     }
                     Spacer(Modifier.weight(1f))
+                    val vpnSt by vpn.state.collectAsState()
+                    val vpnOn by vpn.enabled.collectAsState()
+                    NavVpn(vpnSt is VpnState.On, vpnOn && vpnSt !is VpnState.On && vpnSt !is VpnState.Failed) {
+                        if (vpnOn) { vpn.setEnabled(false); scope.launch { vpn.disconnect() } } else { vpn.setEnabled(true); startVpn() }
+                    }
+                    Spacer(Modifier.width(4.dp))
                     NavigationItem("Quitter", Icons.Default.PowerSettingsNew, false, navSelected, null) { confirmQuit = true }
                 }
                 if (page == "Films" || page == "Séries") androidx.compose.runtime.key(page) { ExplorePage(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), page == "Séries", favTmdb, toggleFavTmdb, watchDiscover, trailerDiscover) }
@@ -866,6 +872,21 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
     }
 }
 
+/** One-press VPN switch in the top bar: green key when connected, amber while connecting. */
+@Composable
+private fun NavVpn(on: Boolean, connecting: Boolean, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50.dp)
+    Row(Modifier.scale(if (focused) 1.07f else 1f).clip(shape)
+        .then(if (focused) Modifier.background(gradFocus) else Modifier.background(if (on) Color(0x3334C759) else Color(0x14FFFFFF)))
+        .border(if (focused) 2.dp else 1.dp, if (focused) Color.White else if (on) Color(0xFF34C759) else Color(0x26FFFFFF), shape)
+        .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick)
+        .padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        // The word "VPN" itself shows the state: grey off, amber connecting, green connected.
+        Text("VPN", color = if (focused) Color.White else if (on) Color(0xFF34C759) else if (connecting) Color(0xFFFFB84D) else muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+    }
+}
+
 @Composable
 private fun NavigationItem(name: String, icon: ImageVector, selected: Boolean, selectedRequester: FocusRequester, downTarget: FocusRequester? = null, onClick: () -> Unit) {
     val shape = RoundedCornerShape(50.dp)
@@ -883,12 +904,12 @@ private fun NavigationItem(name: String, icon: ImageVector, selected: Boolean, s
         .then(if (fill != null) Modifier.background(fill) else Modifier)
         .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, shape)
         .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick)
-        .padding(horizontal = if (quit) 10.dp else 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        .padding(horizontal = if (quit) 9.dp else 6.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, uiLabel(name), tint = if (quit) (if (focused) Color.White else Color(0xFFFF7A7A)) else if (selected || focused) Color.White else muted, modifier = Modifier.size(if (quit) 20.dp else 17.dp))
         // "Quitter" is icon-only.
         if (!quit) {
             Spacer(Modifier.width(6.dp))
-            Text(uiLabel(name), color = if (selected || focused) Color.White else muted, fontSize = 12.5.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1, softWrap = false)
+            Text(uiLabel(name), color = if (selected || focused) Color.White else muted, fontSize = 12.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1, softWrap = false)
         }
     }
 }
@@ -1390,13 +1411,12 @@ private fun RemoveButton(onRemove: () -> Unit) {
             .padding(horizontal = 14.dp, vertical = 8.dp))
 }
 
-/** Settings > VPN: switch, country, public address check, and the QR code to send the WireGuard key from a phone. */
+/** Settings > VPN: Cloudflare WARP built in (free, no account), one switch, public address check. */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun VpnPage(vpn: Vpn, startVpn: () -> Unit, scope: kotlinx.coroutines.CoroutineScope) {
     val state by vpn.state.collectAsState()
     val enabled by vpn.enabled.collectAsState()
-    val configured by vpn.configured.collectAsState()
     val choices by vpn.choices.collectAsState()
     val selected by vpn.selected.collectAsState()
     var ip by remember { mutableStateOf("") }
@@ -1409,37 +1429,22 @@ private fun VpnPage(vpn: Vpn, startVpn: () -> Unit, scope: kotlinx.coroutines.Co
         is VpnState.Failed -> uiLabel("Échec") + " : " + st.message
     }
     SectionTitle("VPN")
-    Text(uiLabel("VPN WireGuard réservé à ZaladinTV : le reste de la TV garde sa connexion normale. Tu fournis ta propre clé (par exemple un fichier WireGuard gratuit de Proton VPN)."),
+    Text(uiLabel("VPN Cloudflare WARP intégré, gratuit et sans compte. Il ne concerne que ZaladinTV : le reste de la TV garde sa connexion normale."),
         color = muted, fontSize = 12.sp, modifier = Modifier.padding(start = 6.dp, bottom = 8.dp))
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Column(Modifier.weight(1f)) {
-            SettingsCard {
-                ToggleRow(uiLabel("Activer le VPN"), if (configured) status else uiLabel("Ajoute d'abord une clé."), enabled && configured) {
-                    if (!configured) return@ToggleRow
-                    if (enabled) { vpn.setEnabled(false); scope.launch { vpn.disconnect() } } else { vpn.setEnabled(true); startVpn() }
-                }
-                if (choices.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        choices.forEach { code -> FavChip(Vpn.countryName(code), selected == code) { scope.launch { vpn.select(code) } } }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                ToggleRow(uiLabel("Mon adresse IP"), if (ip.isBlank()) uiLabel("Appuie pour vérifier") else ip, false, showSwitch = false) {
-                    ip = uiLabel("Vérification…")
-                    scope.launch { ip = try { vpn.publicIp(Net.client) } catch (e: Exception) { uiLabel("Échec") + " : " + e.localizedMessage } }
-                }
+    SettingsCard {
+        ToggleRow(uiLabel("Activer le VPN"), status, enabled) {
+            if (enabled) { vpn.setEnabled(false); scope.launch { vpn.disconnect() } } else { vpn.setEnabled(true); startVpn() }
+        }
+        if (choices.size > 1) {
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                choices.forEach { code -> FavChip(Vpn.countryName(code), selected == code) { scope.launch { vpn.select(code) } } }
             }
         }
-        Column(Modifier.weight(1f)) {
-            SettingsCard {
-                PhoneSetupCard("Scanne avec ton téléphone (même Wi-Fi), puis colle le fichier WireGuard.") { setStatus ->
-                    PhoneSetupServer(onVpn = { text ->
-                        val n = vpn.importConfigs(text)
-                        if (n > 0) { vpn.setEnabled(true); startVpn(); setStatus("$n " + uiLabel("clé(s) reçue(s)")) } else setStatus(uiLabel("Aucune clé WireGuard valide dans ce texte."))
-                    })
-                }
-            }
+        Spacer(Modifier.height(8.dp))
+        ToggleRow(uiLabel("Mon adresse IP"), if (ip.isBlank()) uiLabel("Appuie pour vérifier") else ip, false, showSwitch = false) {
+            ip = uiLabel("Vérification…")
+            scope.launch { ip = try { vpn.publicIp(Net.client) } catch (e: Exception) { uiLabel("Échec") + " : " + e.localizedMessage } }
         }
     }
 }

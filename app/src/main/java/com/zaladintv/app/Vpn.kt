@@ -30,11 +30,11 @@ sealed interface VpnState {
 
 /**
  * Optional WireGuard VPN for ZaladinTV's own traffic (every other app on the device keeps its normal
- * connection). The user brings the configurations, e.g. free Proton VPN WireGuard files, one per
- * country, and picks the country in Settings → VPN; nothing is bundled. Configurations hold private
- * keys: they stay in app-private storage, excluded from backups (see data_extraction_rules).
+ * connection). Built in: Cloudflare WARP, free and without an account (see [Warp]). The user may
+ * also send their own WireGuard files from the phone, one per country. Keys stay in app-private
+ * storage, excluded from backups (see data_extraction_rules).
  */
-class Vpn(private val context: Context, private val proton: ProtonServers) {
+class Vpn(private val context: Context, private val http: OkHttpClient) {
     private val sp = context.getSharedPreferences("vpn", Context.MODE_PRIVATE)
     private val backend by lazy { GoBackend(context.applicationContext) }
 
@@ -45,24 +45,21 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
     /** Countries that have a configuration (country code → date it was sent to ZaladinTV). */
     val countries: StateFlow<Map<String, Long>> = _countries.asStateFlow()
 
-    private val _configured = MutableStateFlow(false)
+    /** Always true: WARP needs nothing from the user. */
+    private val _configured = MutableStateFlow(true)
     val configured: StateFlow<Boolean> = _configured.asStateFlow()
 
     private val _choices = MutableStateFlow<List<String>>(emptyList())
-    /** Countries the user can pick: every Proton free country once a Proton file was sent, plus other imported files. */
+    /** Servers the user can pick: WARP first, then the files sent from the phone. */
     val choices: StateFlow<List<String>> = _choices.asStateFlow()
 
     private val _selected = MutableStateFlow<String?>(null)
-    /** Country the tunnel uses. */
+    /** Server the tunnel uses. */
     val selected: StateFlow<String?> = _selected.asStateFlow()
 
     private val _enabled = MutableStateFlow(sp.getBoolean(KEY_ENABLED, false))
     /** The user's switch; the tunnel follows it whenever the app runs. */
     val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
-
-    private val _reminder = MutableStateFlow<Long?>(null)
-    /** Expiry date to remind the user about (dialog at app start), or null. */
-    val reminder: StateFlow<Long?> = _reminder.asStateFlow()
 
     private val tunnel = object : Tunnel {
         override fun getName() = "zaladintv"
@@ -73,28 +70,23 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
 
     init {
         migrateSingleConfig()
+        migrateToWarp()
         refresh()
     }
 
     /**
-     * Imports every WireGuard configuration found in [text] (several files may be pasted one after
+     * Imports every WireGuard configuration found in [raw] (several files may be pasted one after
      * the other). A country that already had one is replaced. Returns how many were valid.
      */
     fun importConfigs(raw: String): Int {
         // Files saved on Windows start with an invisible byte-order mark and end lines with CR LF;
         // copied text can carry zero-width or non-breaking spaces. None of them may hide "[Interface]".
-        val text = raw.replace(Regex("[﻿​‌‍⁠]"), "").replace(' ', ' ')
+        val text = raw.replace(Regex("[﻿​‌‍⁠]"), "").replace(' ', ' ')
             .replace("\r\n", "\n").replace('\r', '\n')
         val blocks = text.split(Regex("""(?m)(?=^\s*\[Interface])""")).map { it.trim() }.filter { it.isNotEmpty() }
         var count = 0
         var first: String? = null
         val edit = sp.edit()
-        // Renewing = sending a new Proton file: the old Proton files (old key) are dropped.
-        if (blocks.any { isProton(it) && parse(it) != null }) {
-            sp.all.filter { it.key.startsWith(KEY_CFG) && isProton(it.value as? String ?: "") }.keys.forEach {
-                edit.remove(it).remove(KEY_IMP + it.removePrefix(KEY_CFG))
-            }
-        }
         for (block in blocks) {
             if (parse(block) == null) continue
             val code = countryOf(block)
@@ -104,13 +96,12 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
         }
         if (count == 0) return 0
         if (_selected.value == null || sp.getString(KEY_CFG + _selected.value, null) == null) edit.putString(KEY_SELECTED, first)
-        edit.remove(KEY_REMINDED_DAY).apply()
-        _reminder.value = null
+        edit.apply()
         refresh()
         return count
     }
 
-    /** Switches country; reconnects at once when the VPN is on. */
+    /** Switches server; reconnects at once when the VPN is on. */
     suspend fun select(code: String) {
         if (code !in _choices.value) return
         sp.edit().putString(KEY_SELECTED, code).apply()
@@ -118,30 +109,14 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
         if (_enabled.value) connect()
     }
 
-    /** Forgets every configuration and turns the VPN off. */
+    /** Forgets the files sent from the phone and the WARP key, and turns the VPN off. */
     suspend fun removeAll() {
         disconnect()
         val edit = sp.edit()
         sp.all.keys.filter { it.startsWith(KEY_CFG) || it.startsWith(KEY_IMP) }.forEach { edit.remove(it) }
-        edit.remove(KEY_SELECTED).remove(KEY_REMINDED_DAY).putBoolean(KEY_ENABLED, false).apply()
+        edit.remove(KEY_SELECTED).remove(KEY_WARP).putBoolean(KEY_ENABLED, false).apply()
         _enabled.value = false
-        _reminder.value = null
         refresh()
-    }
-
-    /** When a country's configuration stops working (Proton files last a year from creation). */
-    fun expiresAt(code: String): Long? = (_countries.value[code] ?: _countries.value.values.minOrNull())?.let { it + VALIDITY_MS }
-
-    /** App opened: remind once a day during the last month before the first expiry, and after it. */
-    fun checkExpiry() {
-        val end = _countries.value.values.minOrNull()?.plus(VALIDITY_MS) ?: return
-        val now = System.currentTimeMillis()
-        if (end - now <= REMIND_BEFORE_MS && sp.getLong(KEY_REMINDED_DAY, -1) != now / DAY_MS) _reminder.value = end
-    }
-
-    fun dismissReminder() {
-        sp.edit().putLong(KEY_REMINDED_DAY, System.currentTimeMillis() / DAY_MS).apply()
-        _reminder.value = null
     }
 
     /** System consent screen to show first, or null when ZaladinTV may already run its VPN. */
@@ -153,19 +128,28 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
     }
 
     /**
-     * Brings the tunnel up in the selected country: the file sent for it first, then Proton's free
-     * servers there (with the user's Proton key), keeping the first one that really answers.
+     * Brings the tunnel up on the selected server (WARP, or a file sent from the phone), keeping the
+     * first candidate that really answers.
      */
     suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
         val code = _selected.value ?: return@withContext false
-        val candidates = candidates(code).mapNotNull(::parse)
-        if (candidates.isEmpty()) return@withContext false
         if (VpnService.prepare(context) != null) {
             _state.value = VpnState.NeedsPermission
             return@withContext false
         }
         _state.value = VpnState.Connecting
         var error: String? = null
+        val candidates = try {
+            candidates(code).mapNotNull(::parse)
+        } catch (e: Exception) {
+            // WARP registration failed (no network, Cloudflare refused…).
+            _state.value = VpnState.Failed(e.message ?: e.javaClass.simpleName)
+            return@withContext false
+        }
+        if (candidates.isEmpty()) {
+            _state.value = VpnState.Off
+            return@withContext false
+        }
         for (config in candidates) {
             try {
                 backend.setState(tunnel, Tunnel.State.UP, config)
@@ -194,8 +178,8 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
     }
 
     /**
-     * A real request through the tunnel: Proton's servers answer the WireGuard handshake even for a
-     * key they will not carry traffic for, so the handshake alone proves nothing.
+     * A real request through the tunnel: some servers answer the WireGuard handshake even for a key
+     * they will not carry traffic for, so the handshake alone proves nothing.
      */
     private suspend fun trafficFlows(): Boolean {
         // Android needs a moment to route the app through the new tunnel: a few tries over ~8 s.
@@ -209,27 +193,19 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
         return false
     }
 
-    /** Short timeouts; the name is resolved by the tunnel's own DNS (Proton: 10.2.0.1). */
+    /** Short timeouts; the name is resolved by the tunnel's own DNS (WARP: 1.1.1.1). */
     private val probe by lazy {
         OkHttpClient.Builder().connectTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(6, java.util.concurrent.TimeUnit.SECONDS).build()
     }
 
-    /** Configuration texts to try for a country, best first (at most 5). */
-    private fun candidates(code: String): List<String> {
-        val own = sp.getString(KEY_CFG + code, null)
-        val identity = protonIdentity()
-        val fromList = if (identity == null) emptyList() else proton.inCountry(code).shuffled().map { server ->
-            identity + "\n\n[Peer]\n# ${server.name}\nPublicKey = ${server.publicKey}\nAllowedIPs = 0.0.0.0/0\n" +
-                "Endpoint = ${server.ip}:51820\nPersistentKeepalive = 25\n"
-        }
-        return (listOfNotNull(own) + fromList).take(5)
+    /** Configuration texts to try, best first: for WARP, Cloudflare's endpoints (registering once). */
+    private suspend fun candidates(code: String): List<String> {
+        if (code != WARP) return listOfNotNull(sp.getString(KEY_CFG + code, null))
+        val id = Warp.decode(sp.getString(KEY_WARP, null))
+            ?: Warp.register(http).also { sp.edit().putString(KEY_WARP, Warp.encode(it)).apply() }
+        return Warp.configs(id)
     }
-
-    /** [Interface] part of a Proton file the user sent: their key, valid on Proton's free servers. */
-    private fun protonIdentity(): String? =
-        sp.all.entries.filter { it.key.startsWith(KEY_CFG) }.map { it.value as? String ?: "" }
-            .firstOrNull { isProton(it) }?.substringBefore("[Peer]")?.trim()
 
     suspend fun disconnect() = withContext(Dispatchers.IO) {
         runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
@@ -238,7 +214,6 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
 
     /** App start: bring the tunnel up before anything goes to the network (bounded wait). */
     suspend fun startIfEnabled() {
-        runCatching { proton.refreshIfStale() }
         refresh()
         if (_enabled.value && _configured.value && _state.value !is VpnState.On) {
             withTimeoutOrNull(20_000) { connect() }
@@ -261,14 +236,24 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
                 }
             }
         _countries.value = map
-        _configured.value = map.isNotEmpty()
-        val free = if (protonIdentity() != null) proton.countries else emptyList()
-        val all = (free + map.keys.sorted()).distinct()
+        val all = listOf(WARP) + map.keys.sorted()
         _choices.value = all
-        _selected.value = sp.getString(KEY_SELECTED, null)?.takeIf { it in all } ?: map.keys.firstOrNull() ?: all.firstOrNull()
+        _selected.value = sp.getString(KEY_SELECTED, null)?.takeIf { it in all } ?: WARP
     }
 
-    /** 0.4.3/0.4.4 kept a single configuration: file it under its country. */
+    /** WARP replaces Proton VPN: Proton files are dropped and WARP becomes the server. */
+    private fun migrateToWarp() {
+        if (sp.getBoolean(KEY_WARP_MIGRATED, false)) return
+        val edit = sp.edit()
+        sp.all.filter { it.key.startsWith(KEY_CFG) && isProton(it.value as? String ?: "") }.keys.forEach {
+            edit.remove(it).remove(KEY_IMP + it.removePrefix(KEY_CFG))
+        }
+        edit.putString(KEY_SELECTED, WARP).remove("reminded_day").remove("servers_refreshed_at")
+            .putBoolean(KEY_WARP_MIGRATED, true).apply()
+        runCatching { java.io.File(context.filesDir, "proton_free.json").delete() }
+    }
+
+    /** Older versions kept a single configuration: file it under its country. */
     private fun migrateSingleConfig() {
         val old = sp.getString(LEGACY_CONFIG, null) ?: return
         val code = countryOf(old)
@@ -286,7 +271,7 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
             val l = it.trim().lowercase()
             l.startsWith("includedapplications") || l.startsWith("excludedapplications")
         }
-        // DNS servers of the file stay inside the tunnel even when private (Proton: 10.2.0.1).
+        // DNS servers of the file stay inside the tunnel even when private.
         val dns = lines.firstOrNull { it.trim().lowercase().startsWith("dns") }
             ?.substringAfter('=')?.split(',')?.map { it.trim() }
             ?.filter { it.matches(Regex("""\d+\.\d+\.\d+\.\d+""")) }.orEmpty()
@@ -315,27 +300,28 @@ class Vpn(private val context: Context, private val proton: ProtonServers) {
         private const val KEY_IMP = "imp_"
         private const val KEY_SELECTED = "selected"
         private const val KEY_ENABLED = "enabled"
-        private const val KEY_REMINDED_DAY = "reminded_day"
-        private const val DAY_MS = 24 * 3_600_000L
-        private val VALIDITY_MS = 365L * DAY_MS
-        private const val REMIND_BEFORE_MS = 30 * DAY_MS
+        private const val KEY_WARP = "warp"
+        private const val KEY_WARP_MIGRATED = "warp_migrated"
+
+        /** Choice code of the built-in Cloudflare WARP server. */
+        const val WARP = "WARP"
 
         private const val NO_ANSWER = "no server answered"
 
-        /** A Proton VPN file: its server names ("CA-FREE#24") or Proton's in-tunnel DNS. */
+        /** A Proton VPN file (dropped when moving to WARP): its server names ("CA-FREE#24") or Proton's in-tunnel DNS. */
         fun isProton(text: String): Boolean =
             Regex("""(?m)^\s*#\s*[A-Z]{2}(-[A-Z]{2})?(-FREE)?#\d+""").containsMatchIn(text) || text.contains("10.2.0.1")
 
         /** Code for configurations whose server name gives no country. */
         const val OTHER = "ZZ"
 
-        /** Country of a configuration, from the server name Proton writes in it ("# CA-FREE#24", "# NL#12"). */
+        /** Country of a configuration, from the server name a provider writes in it ("# CA-FREE#24", "# NL#12"). */
         fun countryOf(text: String): String =
             Regex("""(?m)^\s*#\s*([A-Z]{2})(?:-[A-Z]{2})?(?:-FREE)?#\d+""").find(text)?.groupValues?.get(1) ?: OTHER
 
-        /** Country name in the app's language. */
+        /** Server name in the app's language. */
         fun countryName(code: String, language: String = Lang.code): String =
-            if (code == OTHER) "WireGuard" else Locale("", code).getDisplayCountry(Locale(language)).ifBlank { code }
+            if (code == WARP) "Cloudflare WARP" else if (code == OTHER) "WireGuard" else Locale("", code).getDisplayCountry(Locale(language)).ifBlank { code }
 
         /** IPv4 space minus private ranges (same list as the WireGuard app's "Exclude private IPs"). */
         private val PUBLIC_IPV4 = listOf(

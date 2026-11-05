@@ -27,7 +27,7 @@ private val en = mapOf(
     "Pas de résumé disponible." to "No summary available.", "Recherche de la bande-annonce…" to "Looking for the trailer…",
     "Pas de bande-annonce disponible" to "No trailer available", "Aucune appli pour lire la vidéo" to "No app to play the video",
     "Absent de ta bibliothèque. Ajoute une source dans Réglages." to "Not in your library. Add a source in Settings.",
-    "Chargement du catalogue…" to "Loading catalog…", "Rechercher une chaîne, un film ou une série" to "Search a channel, movie or show", "Aucun résultat en français." to "No French results.", "Tape le nom d'une chaîne, d'un film ou d'une série." to "Type the name of a channel, movie or show.",
+    "Chargement du catalogue…" to "Loading catalog…", "Rechercher une chaîne, un film ou une série" to "Search a channel, movie or show", "Aucun résultat en français." to "No French results.", "VPN Cloudflare WARP intégré, gratuit et sans compte. Il ne concerne que ZaladinTV : le reste de la TV garde sa connexion normale." to "Built-in Cloudflare WARP VPN, free and without an account. It only covers ZaladinTV: the rest of the TV keeps its normal connection.", "Tape le nom d'une chaîne, d'un film ou d'une série." to "Type the name of a channel, movie or show.",
     "Aucun favori ici. Maintiens OK sur une affiche (ou ouvre sa fiche) pour l'ajouter." to "No favorites here. Hold OK on a poster (or open its page) to add it.",
     "Aucune chaîne à afficher." to "Nothing to show.", "← Retour" to "← Back",
     "Importer un fichier M3U / M3U8" to "Import an M3U / M3U8 file", "Importer une playlist HTTPS" to "Import an HTTPS playlist",
