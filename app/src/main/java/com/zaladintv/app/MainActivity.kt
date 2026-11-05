@@ -378,6 +378,8 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
         listOf("vod", "movie", "film", "cinema", "cinéma").any { ch.group.contains(it, true) } -> "Films"
         else -> "TV en direct"
     }
+    // url -> channel, rebuilt only when the library changes (cheap lookups instead of scanning the whole list on each recomposition).
+    val byUrl = remember(channels) { channels.associateBy { it.url } }
     var libIndex by remember { mutableStateOf<Map<String, List<Channel>>?>(null) }
     LaunchedEffect(channels.size) {
         val snapshot = channels.toList()
@@ -671,7 +673,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                             if (discoverStatus.isNotBlank()) Text(uiLabel(discoverStatus), color = muted)
                             if (channels.isEmpty()) {
                             } else {
-                                val recentChannels = recent.mapNotNull { url -> channels.find { it.url == url } }
+                                val recentChannels = remember(byUrl, recent.toList()) { recent.mapNotNull { url -> byUrl[url] } }
                                 if (recentChannels.isNotEmpty()) {
                                     ChannelShelf("Reprendre le visionnage", recentChannels, favorites, playChannel, toggleFavorite) { search = ""; page = "Recherche" }
                                 }
@@ -714,7 +716,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                             Spacer(Modifier.height(18.dp))
                             val tmFilms = favTmdb.filter { !it.series }
                             val tmSeries = favTmdb.filter { it.series }
-                            val lib = channels.filter { it.url in favorites && (favFilter == "Tout" || kind(it) == favFilter) }
+                            val lib = remember(byUrl, favorites.toList(), favFilter) { favorites.mapNotNull { byUrl[it] }.filter { favFilter == "Tout" || kind(it) == favFilter } }
                             val showFilms = favFilter != "Séries"
                             val showSeries = favFilter != "Films"
                             if (lib.isEmpty() && (!showFilms || tmFilms.isEmpty()) && (!showSeries || tmSeries.isEmpty()))

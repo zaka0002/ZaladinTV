@@ -8,7 +8,7 @@ val localProps = Properties().apply { val f = rootProject.file("local.properties
 android {
     namespace = "com.zaladintv.app"
     compileSdk = 35
-    defaultConfig { applicationId = "com.zaladintv.app"; minSdk = 23; targetSdk = 35; versionCode = 20; versionName = "2.6.7"; buildConfigField("String", "TMDB_KEY", "\"${localProps.getProperty("tmdb.key", "")}\"") }
+    defaultConfig { applicationId = "com.zaladintv.app"; minSdk = 23; targetSdk = 35; versionCode = 21; versionName = "2.6.8"; buildConfigField("String", "TMDB_KEY", "\"${localProps.getProperty("tmdb.key", "")}\"") }
     buildTypes { release { isMinifyEnabled = false } }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
