@@ -97,6 +97,61 @@ private fun isMulti(text: String) = multiMarker.containsMatchIn(text)
 /** Only French and multi-language titles are kept: other languages are dropped when a catalogue is loaded. */
 private fun keepLang(c: Channel) = isFrench(c.group) || isFrench(c.name) || isMulti(c.group) || isMulti(c.name)
 
+/** Parsed catalogue written where the app reads it at launch; shared by the activity and the background worker. */
+private fun writeCatalogCache(dir: java.io.File, id: String, items: List<Channel>) {
+    try {
+        val tmp = java.io.File(dir, "cat2_$id.tmp")
+        tmp.bufferedWriter().use { w ->
+            for (c in items) {
+                w.write(listOf(c.name, c.url, c.group, c.logo, c.type, c.seriesId).joinToString("\t") { it.replace('\t', ' ').replace('\n', ' ') })
+                w.write("\n")
+            }
+        }
+        val dest = java.io.File(dir, "cat2_$id.tsv")
+        if (!tmp.renameTo(dest)) { dest.delete(); tmp.renameTo(dest) }
+    } catch (e: Throwable) { }
+}
+
+/** Every 3 days, in the background: re-downloads each source (French + multi only), refreshes the local copy and posts a notification. */
+class CatalogWorker(ctx: android.content.Context, params: androidx.work.WorkerParameters) : androidx.work.CoroutineWorker(ctx, params) {
+    override suspend fun doWork(): androidx.work.ListenableWorker.Result = withContext(Dispatchers.IO) {
+        val prefs = applicationContext.getSharedPreferences("zaladintv", android.content.Context.MODE_PRIVATE)
+        Net.dns = prefs.getString("dns", DnsChoice.SYSTEM) ?: DnsChoice.SYSTEM
+        val arr = try { org.json.JSONArray(prefs.getString("xt_accounts", "[]")) } catch (e: Exception) { org.json.JSONArray() }
+        var ok = 0; var failed = 0; var total = 0
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            var items: List<Channel>? = null
+            for (attempt in 1..2) {
+                try {
+                    items = XtreamClient(o.getString("server"), o.getString("user"), o.getString("pass"), id).loadCatalog().filter { keepLang(it) }
+                    break
+                } catch (e: Throwable) {
+                    android.util.Log.w("ZTV", "mise à jour automatique, essai $attempt: ${e.javaClass.simpleName} ${e.message}")
+                    if (attempt == 1) kotlinx.coroutines.delay(10_000)
+                }
+            }
+            if (!items.isNullOrEmpty()) { writeCatalogCache(applicationContext.filesDir, id, items); total += items.size; ok++ } else failed++
+        }
+        android.util.Log.i("ZTV", "mise à jour automatique: $ok ok, $failed échec, $total titres")
+        if (ok + failed > 0) notifyDone(ok, failed, total)
+        if (ok == 0 && failed > 0) androidx.work.ListenableWorker.Result.retry() else androidx.work.ListenableWorker.Result.success()
+    }
+
+    private fun notifyDone(ok: Int, failed: Int, total: Int) {
+        val ctx = applicationContext
+        val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        if (android.os.Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(android.app.NotificationChannel("library", "Bibliothèque", android.app.NotificationManager.IMPORTANCE_DEFAULT))
+        val open = android.app.PendingIntent.getActivity(ctx, 0, android.content.Intent(ctx, MainActivity::class.java), android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+        val text = if (failed == 0) "$total titres (français et multilangue) à jour" else "$ok source(s) mise(s) à jour, $failed en échec"
+        val n = androidx.core.app.NotificationCompat.Builder(ctx, "library")
+            .setSmallIcon(android.R.drawable.stat_sys_download_done).setContentTitle("Bibliothèque ZaladinTV mise à jour")
+            .setContentText(text).setContentIntent(open).setAutoCancel(true).build()
+        try { nm.notify(1001, n) } catch (e: SecurityException) { }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("zaladintv", MODE_PRIVATE) }
     private val appScope = kotlinx.coroutines.MainScope()
@@ -154,25 +209,14 @@ class MainActivity : ComponentActivity() {
     }
     // Parsed catalogue kept on disk: a launch reads a local file (~1 s) instead of downloading tens of MB of JSON again.
     private fun cacheFile(id: String) = java.io.File(filesDir, "cat2_$id.tsv")
-    private fun saveCache(id: String, items: List<Channel>) {
-        try {
-            val tmp = java.io.File(filesDir, "cat_$id.tmp")
-            tmp.bufferedWriter().use { w ->
-                for (c in items) {
-                    w.write(listOf(c.name, c.url, c.group, c.logo, c.type, c.seriesId).joinToString("\t") { it.replace('\t', ' ').replace('\n', ' ') })
-                    w.write("\n")
-                }
-            }
-            if (!tmp.renameTo(cacheFile(id))) { cacheFile(id).delete(); tmp.renameTo(cacheFile(id)) }
-        } catch (e: Throwable) { }
-    }
+    private fun saveCache(id: String, items: List<Channel>) = writeCatalogCache(filesDir, id, items)
     private fun readCache(id: String): List<Channel>? = try {
         val f = cacheFile(id)
         if (!f.exists()) null else f.bufferedReader().useLines { lines ->
             lines.mapNotNull { l -> l.split('\t').let { p -> if (p.size >= 6) Channel(p[0], p[1], p[2], p[3], p[4], p[5], src = id) else null } }.toList()
         }
     } catch (e: Throwable) { null }
-    private fun cacheFresh(id: String) = cacheFile(id).let { it.exists() && System.currentTimeMillis() - it.lastModified() < 12 * 3600_000L }
+    private fun cacheFresh(id: String) = cacheFile(id).let { it.exists() && System.currentTimeMillis() - it.lastModified() < 4 * 24 * 3600_000L }
 
     private fun loadAccount(a: XtAccount, onDone: (Boolean, String) -> Unit) {
         statuses[a.id] = "Chargement…"
@@ -229,6 +273,15 @@ class MainActivity : ComponentActivity() {
         coil.Coil.setImageLoader(coil.ImageLoader.Builder(applicationContext).okHttpClient(Net.client).build())
         appScope.launch { vpn.startIfEnabled() }
         loadAccounts()
+        // Background refresh every 3 days (+ a one-off run for testing: adb shell am start -n com.zaladintv.app/.MainActivity --ez refresh_now true).
+        val wm = androidx.work.WorkManager.getInstance(applicationContext)
+        wm.enqueueUniquePeriodicWork("library-refresh", androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+            androidx.work.PeriodicWorkRequestBuilder<CatalogWorker>(3, java.util.concurrent.TimeUnit.DAYS)
+                .setConstraints(androidx.work.Constraints.Builder().setRequiredNetworkType(androidx.work.NetworkType.CONNECTED).build())
+                .setInitialDelay(3, java.util.concurrent.TimeUnit.DAYS).build())
+        if (intent?.getBooleanExtra("refresh_now", false) == true) wm.enqueue(androidx.work.OneTimeWorkRequestBuilder<CatalogWorker>().build())
+        if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 7)
         // One account at a time: two big catalogues downloaded together doubled the memory use.
         val tStart = android.os.SystemClock.elapsedRealtime()
         // Catalogues cached before the language filter existed hold every language: drop them.
@@ -529,7 +582,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                         "Accueil" -> {
                             // "À la une" only shows the French catalogue, whatever the per-source filter says.
                             // Computed once per catalogue change: scanning a 100k-item library on every recomposition froze the UI (ANR).
-                            val home by remember { derivedStateOf {
+                            val home by remember(channels) { derivedStateOf {
                                 val fr = channels.asSequence().filter { !isArabicChannel(it) && (isFrench(it.group) || isFrench(it.name)) }.take(400).toList()
                                 HomeLists(
                                     featured = fr.filter { kind(it) == "Films" || kind(it) == "Séries" }.take(8),
@@ -548,10 +601,18 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                 )
                             } }
                             val featured = home.featured
+                            // "À la une" turns by itself every 8 s; a manual arrow press restarts the timer.
+                            LaunchedEffect(featured.size, featuredIndex) {
+                                if (featured.size > 1) { delay(8_000); featuredIndex = (featuredIndex + 1) % featured.size }
+                            }
                             val hero = featured.getOrNull(featuredIndex % featured.size.coerceAtLeast(1))
+                            // Each change fades and zooms the card in softly instead of cutting.
+                            val heroAnim = remember { androidx.compose.animation.core.Animatable(1f) }
+                            LaunchedEffect(featuredIndex) { heroAnim.snapTo(0f); heroAnim.animateTo(1f, androidx.compose.animation.core.tween(700)) }
                             val heroImg = if (hero != null) rememberPoster(hero) else ""
                             if (hero != null) {
-                            Box(Modifier.fillMaxWidth().height(260.dp).onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.clip(RoundedCornerShape(22.dp))
+                            Box(Modifier.fillMaxWidth().height(260.dp).graphicsLayer { val a = heroAnim.value; alpha = 0.25f + 0.75f * a; scaleX = 0.97f + 0.03f * a; scaleY = 0.97f + 0.03f * a }
+                                .onFocusChanged { if (it.hasFocus) scope.launch { homeScroll.animateScrollTo(0) } }.clip(RoundedCornerShape(22.dp))
                                 .background(Brush.horizontalGradient(listOf(Color(0xFF392358), Color(0xFF172744), Color(0xFF0C1220))))) {
                                 if (heroImg.startsWith("https://", true)) {
                                     // Faint backdrop with a dark fade from the left so the text stays readable.
@@ -590,6 +651,14 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                     }
                                 }
                                 if (featured.size > 1) {
+                                    // Position dots: the active one stretches into a pill.
+                                    Row(Modifier.align(Alignment.BottomStart).padding(start = 32.dp, bottom = 22.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        featured.indices.forEach { i ->
+                                            val on = i == featuredIndex % featured.size
+                                            val w by androidx.compose.animation.core.animateDpAsState(if (on) 24.dp else 8.dp, androidx.compose.animation.core.tween(400), label = "dot")
+                                            Box(Modifier.height(8.dp).width(w).clip(CircleShape).background(if (on) Color(0xFFC8B6FF) else Color(0x55FFFFFF)))
+                                        }
+                                    }
                                     Row(Modifier.align(Alignment.BottomEnd).padding(20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         HeroArrow(Icons.Default.ArrowBack) { featuredIndex = (featuredIndex + featured.size - 1) % featured.size }
                                         HeroArrow(Icons.Default.ArrowForward) { featuredIndex = (featuredIndex + 1) % featured.size }
