@@ -643,16 +643,9 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                     Text(hero?.group ?: uiLabel("Films, séries et chaînes depuis tes sources autorisées"), color = Color(0xFFCED3E7), fontSize = 15.sp)
                                     Spacer(Modifier.height(22.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Button(onClick = { if (hero != null) playChannel(hero) else page = "Réglages" }) {
-                                            Icon(if (hero != null) Icons.Default.PlayArrow else Icons.Default.Add, null)
-                                            Spacer(Modifier.width(7.dp))
-                                            Text(uiLabel(if (hero != null) "Regarder" else "Ajouter une source"))
-                                        }
+                                        GradientButton(if (hero != null) "Regarder" else "Ajouter une source", if (hero != null) Icons.Default.PlayArrow else Icons.Default.Add) { if (hero != null) playChannel(hero) else page = "Réglages" }
                                         if (hero != null) {
-                                            OutlinedButton(onClick = { toggleFavorite(hero) }) {
-                                                Icon(if (favorites.contains(hero.url)) Icons.Default.Favorite else Icons.Default.FavoriteBorder, null)
-                                                Spacer(Modifier.width(6.dp)); Text(uiLabel("Ma liste"))
-                                            }
+                                            GradientButton("Ma liste", if (favorites.contains(hero.url)) Icons.Default.Favorite else Icons.Default.FavoriteBorder, ghost = true) { toggleFavorite(hero) }
                                         }
                                     }
                                 }
@@ -774,13 +767,13 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                                                             TvField(value = password, onValueChange = { password = it }, label = { Text(uiLabel("Mot de passe")) }, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.weight(1f), singleLine = true)
                                                         }
                                                         Spacer(Modifier.height(8.dp))
-                                                        Button(onClick = {
+                                                        GradientButton("Ajouter la source", Icons.Default.Add, enabled = (server.startsWith("https://") || server.startsWith("http://")) && username.isNotBlank() && password.isNotBlank(), onClick = {
                                                             remoteStatus = uiLabel("Chargement…")
                                                             addAccount(accName, server, username, password) { r ->
                                                                 remoteStatus = r
                                                                 if (!r.startsWith("Connexion impossible") && !r.startsWith("Cette source")) { accName = ""; server = ""; username = ""; password = "" }
                                                             }
-                                                        }, enabled = (server.startsWith("https://") || server.startsWith("http://")) && username.isNotBlank() && password.isNotBlank()) { Text(uiLabel("Ajouter la source")) }
+                                                        })
                                                         if (remoteStatus.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(uiLabel(remoteStatus), color = muted, fontSize = 13.sp) }
                                                     }
                                                     Spacer(Modifier.height(6.dp))
@@ -1185,6 +1178,12 @@ private fun TvField(value: String, onValueChange: (String) -> Unit, label: @Comp
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     LaunchedEffect(editing) { if (editing) keyboard?.show() else keyboard?.hide() }
     OutlinedTextField(value = value, onValueChange = onValueChange, label = label, singleLine = singleLine,
+        shape = RoundedCornerShape(18.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = Color(0xFF9D85FF), unfocusedBorderColor = Color(0x33FFFFFF),
+            focusedContainerColor = Color(0x1AFFFFFF), unfocusedContainerColor = Color(0x0DFFFFFF),
+            focusedLabelColor = Color(0xFF9D85FF), unfocusedLabelColor = muted, cursorColor = Color(0xFF9D85FF),
+            focusedTextColor = Color.White, unfocusedTextColor = Color.White),
         visualTransformation = visualTransformation, readOnly = !editing,
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
         keyboardActions = KeyboardActions(onDone = { editing = false }),
@@ -1225,7 +1224,8 @@ private fun FavChip(label: String, selected: Boolean, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     Text(uiLabel(label), color = if (selected || focused) Color.White else muted, fontSize = 14.sp,
         modifier = Modifier.scale(if (focused) 1.06f else 1f).onFocusChanged { focused = it.isFocused }
-            .background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF2B3D72) else panel, RoundedCornerShape(50.dp))
+            .then(if (focused) Modifier.background(gradFocus, RoundedCornerShape(50.dp)) else if (selected) Modifier.background(gradSelected, RoundedCornerShape(50.dp)) else Modifier.background(glassFill, RoundedCornerShape(50.dp)))
+            .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(50.dp))
             .clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 8.dp))
 }
 
@@ -1242,9 +1242,9 @@ private fun ConfirmButton(label: String, onConfirm: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     // Same look as the other settings buttons: dark pill, white text, clear focus ring, red once armed.
     Text(uiLabel(if (armed) "Confirmer ?" else label), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-            .background(if (armed) Color(0xFFD64545) else if (focused) Color(0xFF3B4F8F) else Color(0xFF2A3047))
-            .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
+            .background(if (armed) Color(0xFFD64545) else if (focused) glassFocus else glassFill)
+            .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(18.dp))
             .onFocusChanged { focused = it.isFocused; if (!it.isFocused) armed = false }
             .clickable { if (armed) { armed = false; onConfirm() } else armed = true }
             .padding(horizontal = 18.dp, vertical = 14.dp))
@@ -1271,27 +1271,56 @@ private fun HeroArrow(icon: ImageVector, onClick: () -> Unit) {
     }
 }
 
-// ---------------------------------------------------------------- Apple-style settings building blocks
+// ---------------------------------------------------------------- Modern building blocks (shared look: glass cards, violet-blue gradient)
 private val cardBg = Color(0xFF161B28)
+private val gradFocus = Brush.horizontalGradient(listOf(Color(0xFF8B6CFF), Color(0xFF4C7DFF)))
+private val gradSelected = Brush.horizontalGradient(listOf(Color(0xFF5B45C9), Color(0xFF3A4FA8)))
+private val glassFill = Color(0x14FFFFFF)
+private val glassFocus = Color(0x2EFFFFFF)
+
+/** Pill button: gradient when focused, deep gradient at rest, glass when [ghost], flat grey when disabled. */
+@Composable
+private fun GradientButton(label: String, icon: ImageVector? = null, enabled: Boolean = true, ghost: Boolean = false, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50.dp)
+    val fill: Brush = when {
+        !enabled -> androidx.compose.ui.graphics.SolidColor(Color(0x1FFFFFFF))
+        focused -> gradFocus
+        ghost -> androidx.compose.ui.graphics.SolidColor(Color(0x1FFFFFFF))
+        else -> gradSelected
+    }
+    Row(Modifier.scale(if (focused && enabled) 1.05f else 1f).clip(shape).background(fill)
+        .border(if (focused) 2.dp else if (ghost) 1.dp else 0.dp, if (focused) Color.White else Color(0x40FFFFFF), shape)
+        .onFocusChanged { focused = it.isFocused }
+        .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier.focusable())
+        .padding(horizontal = 22.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (icon != null) { Icon(icon, null, tint = if (enabled) Color.White else muted, modifier = Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)) }
+        Text(uiLabel(label), color = if (enabled) Color.White else muted, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
 
 @Composable
 private fun SectionTitle(text: String) {
-    Text(uiLabel(text).uppercase(), color = Color(0xFF8A93A8), fontSize = 12.sp, letterSpacing = 1.2.sp, fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
+    Row(Modifier.padding(start = 4.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(4.dp).height(14.dp).clip(RoundedCornerShape(2.dp)).background(gradFocus))
+        Spacer(Modifier.width(8.dp))
+        Text(uiLabel(text).uppercase(), color = Color(0xFF9AA3B8), fontSize = 12.sp, letterSpacing = 1.2.sp, fontWeight = FontWeight.SemiBold)
+    }
 }
 
 @Composable
 private fun SettingsCard(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(cardBg)
-        .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(20.dp)).padding(12.dp), content = content)
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp))
+        .background(Brush.verticalGradient(listOf(Color(0xFF1B2132), Color(0xFF141926))))
+        .border(1.dp, Color(0x1FFFFFFF), RoundedCornerShape(24.dp)).padding(14.dp), content = content)
 }
 
 @Composable
 private fun SideItem(icon: ImageVector, label: String, selected: Boolean, requester: FocusRequester? = null, onSelect: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    Row((if (requester != null) Modifier.focusRequester(requester) else Modifier).fillMaxWidth().clip(RoundedCornerShape(14.dp))
-        .background(if (focused) Color(0xFF3B4F8F) else if (selected) Color(0xFF232C45) else Color.Transparent)
-        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
+    Row((if (requester != null) Modifier.focusRequester(requester) else Modifier).fillMaxWidth().clip(RoundedCornerShape(50.dp))
+        .then(if (focused) Modifier.background(gradFocus) else if (selected) Modifier.background(gradSelected) else Modifier)
+        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(50.dp))
         .onFocusChanged { focused = it.isFocused; if (it.isFocused) onSelect() }.clickable(onClick = onSelect)
         .padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, null, tint = if (selected || focused) Color.White else muted, modifier = Modifier.size(20.dp))
@@ -1304,9 +1333,9 @@ private fun SideItem(icon: ImageVector, label: String, selected: Boolean, reques
 @Composable
 private fun ToggleRow(title: String, subtitle: String, checked: Boolean, modifier: Modifier = Modifier, showSwitch: Boolean = true, subtitleLines: Int = 1, onToggle: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    Row(modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-        .background(if (focused) Color(0xFF2B3552) else Color(0xFF1C2232))
-        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
+    Row(modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
+        .background(if (focused) glassFocus else glassFill)
+        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(18.dp))
         .onFocusChanged { focused = it.isFocused }.clickable(onClick = onToggle).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
@@ -1315,7 +1344,7 @@ private fun ToggleRow(title: String, subtitle: String, checked: Boolean, modifie
         }
         if (showSwitch) {
             Spacer(Modifier.width(12.dp))
-            Box(Modifier.width(54.dp).height(31.dp).clip(RoundedCornerShape(50.dp)).background(if (checked) Color(0xFF34C759) else Color(0xFF3A3F4F))) {
+            Box(Modifier.width(54.dp).height(31.dp).clip(RoundedCornerShape(50.dp)).then(if (checked) Modifier.background(gradFocus) else Modifier.background(Color(0xFF3A3F4F)))) {
                 Box(Modifier.padding(3.dp).align(if (checked) Alignment.CenterEnd else Alignment.CenterStart).size(25.dp).clip(CircleShape).background(Color.White))
             }
         }
@@ -1325,13 +1354,13 @@ private fun ToggleRow(title: String, subtitle: String, checked: Boolean, modifie
 @Composable
 private fun CheckRow(title: String, selected: Boolean, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-        .background(if (focused) Color(0xFF2B3552) else Color(0xFF1C2232))
-        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(14.dp))
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
+        .background(if (focused) glassFocus else glassFill)
+        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(18.dp))
         .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Text(title, color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
-        if (selected) Icon(Icons.Default.Check, null, tint = Color(0xFF34C759), modifier = Modifier.size(22.dp))
+        if (selected) Icon(Icons.Default.Check, null, tint = Color(0xFF9D85FF), modifier = Modifier.size(22.dp))
     }
 }
 
@@ -1340,7 +1369,7 @@ private fun PillButton(label: String, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     Text(uiLabel(label), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(RoundedCornerShape(50.dp))
-            .background(if (focused) Color(0xFF3B4F8F) else Color(0xFF2B3D72))
+            .background(if (focused) gradFocus else gradSelected)
             .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(50.dp))
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
@@ -1354,7 +1383,7 @@ private fun RemoveButton(onRemove: () -> Unit) {
     var armed by remember { mutableStateOf(false) }
     Text(uiLabel(if (armed) "Confirmer ?" else "Supprimer"), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(RoundedCornerShape(50.dp))
-            .background(if (armed) Color(0xFFD64545) else if (focused) Color(0xFF3B4F8F) else Color(0xFF2A3047))
+            .background(if (armed) Color(0xFFD64545) else if (focused) Color(0xFF3B4F8F) else Color(0x1FFFFFFF))
             .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(50.dp))
             .onFocusChanged { focused = it.isFocused; if (!it.isFocused) armed = false }
             .clickable { if (armed) { armed = false; onRemove() } else armed = true }
