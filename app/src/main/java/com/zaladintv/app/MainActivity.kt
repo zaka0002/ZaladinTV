@@ -459,12 +459,42 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
         if (favorites.contains(channel.url)) favorites.remove(channel.url) else favorites.add(channel.url)
         prefs.edit().putStringSet("favorites", favorites.toSet()).apply()
     }
+    // ---- automatic fallback: when a film/episode cannot be played, try another copy of the same title (other source first)
+    val triedUrls = remember { mutableSetOf<String>() }
+    LaunchedEffect(playing == null) { if (playing == null) triedUrls.clear() }
+    suspend fun findAlternative(cur: Channel, tried: Set<String>): Channel? {
+        val idx = libIndex ?: return null
+        val order = compareBy<Channel>({ if (isArabicChannel(it)) 1 else 0 }, { if (isFrench(it.group) || isFrench(it.name)) 0 else 1 })
+        if (cur.type == "Épisode") {
+            val key = "Séries|" + normTitle(TmdbClient.cleanTitle(cur.show).first)
+            for (cand in idx[key].orEmpty().sortedWith(order)) {
+                val client = xtreams[cand.src] ?: continue
+                val eps = try { withContext(Dispatchers.IO) { client.loadEpisodes(cand.seriesId) } } catch (e: Exception) { continue }
+                val m = eps.firstOrNull { it.season == cur.season && it.episode == cur.episode && it.url !in tried } ?: continue
+                return m.copy(show = cand.name)
+            }
+            return null
+        }
+        if (cur.type != "Films") return null
+        val key = "Films|" + normTitle(TmdbClient.cleanTitle(cur.name).first)
+        return idx[key].orEmpty().filter { it.url !in tried && it.url != cur.url }.sortedWith(order).firstOrNull()
+    }
+    val onPlayFailed: (Channel) -> Unit = { cur ->
+        triedUrls.add(cur.url)
+        scope.launch {
+            val alt = try { findAlternative(cur, triedUrls.toSet()) } catch (e: Exception) { null }
+            if (alt != null) {
+                android.widget.Toast.makeText(context, uiLabel("Cette source ne répond pas : essai d'une autre copie…"), android.widget.Toast.LENGTH_LONG).show()
+                playing = alt
+            } else android.widget.Toast.makeText(context, uiLabel("Lecture impossible : aucune autre source pour ce titre."), android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
     BackHandler(enabled = playing != null || selectedSeries != null) {
         if (playing != null) playing = null else selectedSeries = null
     }
     MaterialTheme(colorScheme = darkColorScheme(primary = accent, onPrimary = Color(0xFF120D26), background = bg, surface = panel)) {
         if (playing != null) {
-            PlayerScreen(playing!!, onBack = { playing = null })
+            PlayerScreen(playing!!, onBack = { playing = null }, onFail = onPlayFailed)
         } else {
             if (detail != null) {
                 val d = detail!!
@@ -1056,7 +1086,7 @@ private fun ChannelGrid(channels: List<Channel>, favorites: List<String>, onPlay
 }
 
 @Composable
-private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
+private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onFail: (Channel) -> Unit = {}) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("zaladintv", Activity.MODE_PRIVATE) }
     val posKey = "pos_${channel.url.hashCode()}"
@@ -1108,6 +1138,12 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
     var posMs by remember { mutableStateOf(0L) }
     var durMs by remember { mutableStateOf(0L) }
     var playing by remember { mutableStateOf(true) }
+    var everReady by remember(channel.url) { mutableStateOf(false) }
+    // Never started within 30 s (server not answering): treat it as a failure too, for films and episodes only.
+    LaunchedEffect(channel.url) {
+        delay(30_000)
+        if (!everReady && (channel.type == "Films" || channel.type == "Épisode")) onFail(channel)
+    }
     var tracks by remember { mutableStateOf(player.currentTracks) }
     var speed by remember { mutableStateOf(1f) }
     var panel by remember { mutableStateOf("") }
@@ -1115,6 +1151,9 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
         val l = object : androidx.media3.common.Player.Listener {
             override fun onTracksChanged(t: androidx.media3.common.Tracks) { tracks = t }
             override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+            override fun onPlaybackStateChanged(state: Int) { if (state == androidx.media3.common.Player.STATE_READY) everReady = true }
+            // Source error (dead link, refused, unsupported file): hand over to the fallback.
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) { onFail(channel) }
         }
         player.addListener(l)
         onDispose { player.removeListener(l) }
