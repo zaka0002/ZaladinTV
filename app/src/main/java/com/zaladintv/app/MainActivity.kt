@@ -272,6 +272,8 @@ class MainActivity : ComponentActivity() {
         // Images (Coil) and video (Media3) share the app's HTTP client, so DNS and VPN apply to them too.
         coil.Coil.setImageLoader(coil.ImageLoader.Builder(applicationContext).okHttpClient(Net.client).build())
         appScope.launch { vpn.startIfEnabled() }
+        // Offer a newer release at every launch (dialog), like Zaal TV.
+        appScope.launch { try { kotlinx.coroutines.delay(4_000); Updater.check(manual = false) } catch (e: Exception) { } }
         loadAccounts()
         // Background refresh every 3 days (+ a one-off run for testing: adb shell am start -n com.zaladintv.app/.MainActivity --ez refresh_now true).
         val wm = androidx.work.WorkManager.getInstance(applicationContext)
@@ -323,6 +325,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
     // Back from any other page returns to Accueil; on Accueil it asks before leaving. Panels and the player register later, so they win.
     BackHandler(enabled = page != "Accueil") { page = "Accueil" }
     BackHandler(enabled = page == "Accueil" && !confirmQuit) { confirmQuit = true }
+    UpdateDialog()
     if (confirmQuit) {
         val stay = remember { FocusRequester() }
         LaunchedEffect(Unit) { delay(150); try { stay.requestFocus() } catch (e: Exception) { } }
@@ -1305,7 +1308,7 @@ private val glassFocus = Color(0x2EFFFFFF)
 
 /** Pill button: gradient when focused, deep gradient at rest, glass when [ghost], flat grey when disabled. */
 @Composable
-private fun GradientButton(label: String, icon: ImageVector? = null, enabled: Boolean = true, ghost: Boolean = false, onClick: () -> Unit) {
+fun GradientButton(label: String, icon: ImageVector? = null, enabled: Boolean = true, ghost: Boolean = false, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(50.dp)
     val fill: Brush = when {
