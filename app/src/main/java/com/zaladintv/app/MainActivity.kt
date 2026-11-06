@@ -1066,6 +1066,8 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
         ).build().apply {
             val saved = if (prefs.getBoolean("resume", true)) prefs.getLong(posKey, 0L) else 0L
             setMediaItem(MediaItem.fromUri(Uri.parse(channel.url)), if (saved > 10_000L) saved else 0L)
+            // Subtitles are off by default; the Sous-titres button turns them on.
+            trackSelectionParameters = trackSelectionParameters.buildUpon().setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build()
             prepare()
             playWhenReady = true
         }
@@ -1098,51 +1100,186 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
     val skipFocus = remember { FocusRequester() }
     LaunchedEffect(inIntro) { if (inIntro) try { skipFocus.requestFocus() } catch (e: Exception) { } }
     DisposableEffect(player) { onDispose { savePosition(); player.release() } }
-    var playerView by remember { mutableStateOf<PlayerView?>(null) }
     val playerRoot = remember { FocusRequester() }
-    // The title/back strip follows the control bar: visible with it, hidden while just watching.
-    var controlsVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(Unit) { delay(300); try { playerRoot.requestFocus() } catch (e: Exception) { } }
-    // Remote control handled here, whatever holds the focus: OK = play/pause, Left/Right = -/+ 10 s, Up/Down = show the bar.
+    val playFocus = remember { FocusRequester() }
+    // ---- own remote-friendly controls (the stock Media3 bar can't be reached with a D-pad)
+    var barVisible by remember { mutableStateOf(true) }
+    var lastTouch by remember { mutableStateOf(0L) }
+    var posMs by remember { mutableStateOf(0L) }
+    var durMs by remember { mutableStateOf(0L) }
+    var playing by remember { mutableStateOf(true) }
+    var tracks by remember { mutableStateOf(player.currentTracks) }
+    var speed by remember { mutableStateOf(1f) }
+    var panel by remember { mutableStateOf("") }
+    DisposableEffect(player) {
+        val l = object : androidx.media3.common.Player.Listener {
+            override fun onTracksChanged(t: androidx.media3.common.Tracks) { tracks = t }
+            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+        }
+        player.addListener(l)
+        onDispose { player.removeListener(l) }
+    }
+    LaunchedEffect(player) { while (true) { posMs = player.currentPosition; durMs = player.duration.coerceAtLeast(0L); delay(500) } }
+    // Hides itself 5 s after the last key, only while playing and with no list open.
+    LaunchedEffect(lastTouch, barVisible, panel, playing) { if (barVisible && panel.isEmpty() && playing) { delay(5_000); barVisible = false } }
+    LaunchedEffect(barVisible) {
+        delay(80)
+        try { if (barVisible) playFocus.requestFocus() else playerRoot.requestFocus() } catch (e: Exception) { }
+    }
+    fun audioGroups() = tracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_AUDIO && it.length > 0 }
+    fun textGroups() = tracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT && it.length > 0 }
+    fun seek(delta: Long) {
+        val dur = player.duration
+        val target = (player.currentPosition + delta).coerceAtLeast(0L)
+        player.seekTo(if (dur > 0) target.coerceAtMost(dur - 1000L) else target)
+    }
+    fun toggle() { if (player.isPlaying) player.pause() else player.play() }
+    BackHandler(enabled = panel.isNotEmpty()) { panel = "" }
+    // Remote control: with the bar hidden OK = play/pause, Left/Right = -/+ 10 s, Up/Down = show the bar; with the bar shown the buttons take the keys.
     Box(Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { e ->
         if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        lastTouch = System.currentTimeMillis()
         val ok = e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter
-        if (inIntro && ok) return@onPreviewKeyEvent false
-        fun seek(delta: Long) {
-            val dur = player.duration
-            val target = (player.currentPosition + delta).coerceAtLeast(0L)
-            player.seekTo(if (dur > 0) target.coerceAtMost(dur - 1000L) else target)
-        }
+        if (panel.isNotEmpty() || (inIntro && ok)) return@onPreviewKeyEvent false
         when {
-            ok || e.key == Key.MediaPlayPause -> { if (player.isPlaying) player.pause() else player.play(); playerView?.showController(); true }
-            e.key == Key.MediaPlay -> { player.play(); playerView?.showController(); true }
-            e.key == Key.MediaPause -> { player.pause(); playerView?.showController(); true }
-            e.key == Key.DirectionLeft || e.key == Key.MediaRewind -> { seek(-10_000L); playerView?.showController(); true }
-            e.key == Key.DirectionRight || e.key == Key.MediaFastForward -> { seek(10_000L); playerView?.showController(); true }
-            e.key == Key.DirectionUp || e.key == Key.DirectionDown -> { playerView?.showController(); true }
+            e.key == Key.MediaPlayPause -> { toggle(); barVisible = true; true }
+            e.key == Key.MediaPlay -> { player.play(); barVisible = true; true }
+            e.key == Key.MediaPause -> { player.pause(); barVisible = true; true }
+            e.key == Key.MediaRewind -> { seek(-10_000L); barVisible = true; true }
+            e.key == Key.MediaFastForward -> { seek(10_000L); barVisible = true; true }
+            barVisible -> false
+            ok -> { toggle(); barVisible = true; true }
+            e.key == Key.DirectionLeft -> { seek(-10_000L); barVisible = true; true }
+            e.key == Key.DirectionRight -> { seek(10_000L); barVisible = true; true }
+            e.key == Key.DirectionUp || e.key == Key.DirectionDown -> { barVisible = true; true }
             else -> false
         }
     }.focusRequester(playerRoot).focusable()) {
-        // PlayerView draws the bar (play/pause, ±10 s, seek bar, times); the keys above drive it.
         AndroidView(factory = {
             PlayerView(it).apply {
-                playerView = this
-                setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { v -> controlsVisible = v == android.view.View.VISIBLE })
-                this.player = player; useController = true
-                controllerShowTimeoutMs = 4000; controllerHideOnTouch = true
-                setShowRewindButton(true); setShowFastForwardButton(true)
-                setShowPreviousButton(false); setShowNextButton(false)
+                this.player = player; useController = false
                 isFocusable = false; isFocusableInTouchMode = false
+                // Readable subtitles: white text with a black outline (no box), larger, lifted above the control bar.
+                subtitleView?.apply {
+                    setApplyEmbeddedStyles(false)
+                    setStyle(androidx.media3.ui.CaptionStyleCompat(android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
+                        androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE, android.graphics.Color.BLACK, null))
+                    setFractionalTextSize(androidx.media3.ui.SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * 1.25f)
+                    setBottomPaddingFraction(0.09f)
+                }
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                post { showController() }
             }
         }, modifier = Modifier.fillMaxSize())
-        if (inIntro) Button(onClick = { intro?.let { player.seekTo(it.second) }; inIntro = false },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(48.dp).focusRequester(skipFocus)) { Text(uiLabel("Passer l'intro")) }
-        if (controlsVisible) Row(Modifier.align(Alignment.TopStart).background(Color(0xB9000000)).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text(uiLabel("← Retour")) }
-            Text(channel.name, color = Color.White)
+        if (inIntro) Box(Modifier.align(Alignment.BottomEnd).padding(bottom = if (barVisible) 130.dp else 48.dp, end = 48.dp).focusRequester(skipFocus)) {
+            GradientButton("Passer l'intro", Icons.Default.SkipNext) { intro?.let { player.seekTo(it.second) }; inIntro = false }
         }
+        if (barVisible) {
+            Row(Modifier.align(Alignment.TopStart).fillMaxWidth().background(Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent))).padding(horizontal = 24.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                PlayerBtn(Icons.Default.ArrowBack, "Retour", null, onBack)
+                Spacer(Modifier.width(16.dp))
+                Text(channel.name, color = Color(0xDDFFFFFF), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6000000)))).padding(horizontal = 40.dp, vertical = 16.dp)) {
+                fun fmt(ms: Long): String { val t = ms / 1000; return if (t >= 3600) "%d:%02d:%02d".format(t / 3600, t % 3600 / 60, t % 60) else "%02d:%02d".format(t / 60, t % 60) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(fmt(posMs), color = Color(0xDDFFFFFF), fontSize = 13.sp)
+                    Spacer(Modifier.width(14.dp))
+                    var barFocused by remember { mutableStateOf(false) }
+                    // The seek bar is a D-pad target too: Left/Right = -/+ 10 s while it is focused.
+                    Box(Modifier.weight(1f).height(if (barFocused) 10.dp else 4.dp).clip(RoundedCornerShape(50.dp)).background(Color(0x40FFFFFF))
+                        .border(if (barFocused) 2.dp else 0.dp, if (barFocused) Color.White else Color.Transparent, RoundedCornerShape(50.dp))
+                        .onFocusChanged { barFocused = it.isFocused }
+                        .onPreviewKeyEvent { e ->
+                            if (e.type == KeyEventType.KeyDown && (e.key == Key.DirectionLeft || e.key == Key.DirectionRight)) { seek(if (e.key == Key.DirectionLeft) -10_000L else 10_000L); true } else false
+                        }.focusable()) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(if (durMs > 0) (posMs.toFloat() / durMs).coerceIn(0f, 1f) else 0f).background(gradFocus))
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Text(if (durMs > 0) fmt(durMs) else "--:--", color = Color(0x99FFFFFF), fontSize = 13.sp)
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    PlayerBtn(Icons.Default.Replay10, null, null) { seek(-10_000L) }
+                    PlayerBtn(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, if (playing) "Pause" else "Lecture", playFocus) { toggle() }
+                    PlayerBtn(Icons.Default.Forward10, null, null) { seek(10_000L) }
+                    Spacer(Modifier.weight(1f))
+                    if (audioGroups().sumOf { it.length } > 1) PlayerBtn(Icons.Default.Audiotrack, "Audio", null) { panel = "audio" }
+                    if (textGroups().isNotEmpty()) PlayerBtn(Icons.Default.Subtitles, "Sous-titres", null) { panel = "text" }
+                    PlayerBtn(Icons.Default.Speed, if (speed == 1f) "Vitesse" else "x" + speed.toString().removeSuffix(".0"), null) { panel = "speed" }
+                }
+            }
+        }
+        if (panel.isNotEmpty()) {
+            // Options of the open list: (label, selected, action).
+            data class Opt(val label: String, val selected: Boolean, val act: () -> Unit)
+            fun trackLabel(f: androidx.media3.common.Format, n: Int): String {
+                val lang = f.language?.takeIf { it.isNotBlank() && it != "und" }?.let { java.util.Locale(it).getDisplayLanguage(java.util.Locale(Lang.code)).replaceFirstChar { c -> c.uppercase() } }
+                val lab = f.label?.takeIf { it.isNotBlank() }?.replaceFirstChar { c -> c.uppercase() }
+                // Language name first; the provider's own label is added only when it says more ("Français SDH").
+                val base = if (lang != null) (if (lab != null && lab.contains(' ') && !lab.equals(lang, true)) "$lang ($lab)" else lang) else lab ?: (uiLabel("Piste") + " $n")
+                val extra = if (f.channelCount > 2 && f.label.isNullOrBlank()) " 5.1" else ""
+                return base + extra
+            }
+            val opts: List<Opt> = when (panel) {
+                "audio" -> audioGroups().flatMap { g -> (0 until g.length).map { i -> Triple(g, i, g.getTrackFormat(i)) } }.mapIndexed { n, (g, i, f) ->
+                    Opt(trackLabel(f, n + 1), g.isTrackSelected(i)) {
+                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                            .setOverrideForType(androidx.media3.common.TrackSelectionOverride(g.mediaTrackGroup, i)).build()
+                        panel = ""
+                    }
+                }
+                "text" -> {
+                    val off = player.trackSelectionParameters.disabledTrackTypes.contains(androidx.media3.common.C.TRACK_TYPE_TEXT) || textGroups().none { g -> (0 until g.length).any { g.isTrackSelected(it) } }
+                    listOf(Opt(uiLabel("Désactivés"), off) {
+                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build(); panel = ""
+                    }) + textGroups().flatMap { g -> (0 until g.length).map { i -> Triple(g, i, g.getTrackFormat(i)) } }.mapIndexed { n, (g, i, f) ->
+                        Opt(trackLabel(f, n + 1), !off && g.isTrackSelected(i)) {
+                            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
+                                .setOverrideForType(androidx.media3.common.TrackSelectionOverride(g.mediaTrackGroup, i)).build()
+                            panel = ""
+                        }
+                    }
+                }
+                else -> listOf(0.75f, 1f, 1.25f, 1.5f, 2f).map { v -> Opt("x" + v.toString().removeSuffix(".0"), v == speed) { speed = v; player.setPlaybackSpeed(v); panel = "" } }
+            }
+            val first = remember(panel) { FocusRequester() }
+            LaunchedEffect(panel) { delay(120); try { first.requestFocus() } catch (e: Exception) { } }
+            AlertDialog(onDismissRequest = { panel = "" },
+                title = { Text(uiLabel(when (panel) { "audio" -> "Langue audio"; "text" -> "Sous-titres"; else -> "Vitesse de lecture" })) },
+                text = {
+                    Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        opts.forEachIndexed { i, o ->
+                            var f by remember { mutableStateOf(false) }
+                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                                .background(if (f) Color(0x330F1B3D) else Color(0x14000000))
+                                .border(if (f) 2.dp else 0.dp, if (f) Color(0xFF6D4AE0) else Color.Transparent, RoundedCornerShape(14.dp))
+                                .then(if (i == 0) Modifier.focusRequester(first) else Modifier)
+                                .onFocusChanged { f = it.isFocused }.clickable { o.act() }.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(o.label, modifier = Modifier.weight(1f), fontSize = 16.sp, fontWeight = if (o.selected) FontWeight.Bold else FontWeight.Normal)
+                                if (o.selected) Icon(Icons.Default.Check, null, tint = Color(0xFF6D4AE0))
+                            }
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { panel = "" }) { Text(uiLabel("Fermer")) } })
+        }
+    }
+}
+
+/** Round-ended button of the player bar: glass at rest, gradient + white ring when focused. */
+@Composable
+private fun PlayerBtn(icon: ImageVector, label: String?, requester: FocusRequester?, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50.dp)
+    Row((if (requester != null) Modifier.focusRequester(requester) else Modifier)
+        .scale(if (focused) 1.08f else 1f).clip(shape)
+        .then(if (focused) Modifier.background(gradFocus) else Modifier.background(Color(0x1FFFFFFF)))
+        .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, shape)
+        .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick)
+        .padding(horizontal = if (label == null || !focused) 11.dp else 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        // Discreet: a small translucent icon; the name only shows on the focused button.
+        Icon(icon, label?.let { uiLabel(it) }, tint = if (focused) Color.White else Color(0xCCFFFFFF), modifier = Modifier.size(20.dp))
+        if (label != null && focused) { Spacer(Modifier.width(6.dp)); Text(uiLabel(label), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
     }
 }
 
