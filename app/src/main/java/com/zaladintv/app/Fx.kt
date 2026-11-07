@@ -28,6 +28,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
+/** Weak boxes (2 GB RAM, e.g. Freebox Player): lighter effects and image settings. Set once at launch. */
+object Perf { @Volatile var low = false }
+
 private val fxBrush = Brush.linearGradient(listOf(Color(0xFFA78BFF), Color(0xFF5B8CFF)))
 
 /**
@@ -49,7 +52,7 @@ fun Modifier.posterFocus(
             val v = p.value
             val s = 1f + (scaleTo - 1f) * v
             scaleX = s; scaleY = s
-            translationY = -7.dp.toPx() * v
+            if (!Perf.low) translationY = -7.dp.toPx() * v
         }
         .drawWithContent {
             val v = p.value
@@ -57,27 +60,36 @@ fun Modifier.posterFocus(
             if (base.alpha > 0f || focusBg.alpha > 0f) drawRoundRect(lerp(base, focusBg, v), cornerRadius = r)
             drawContent()
             if (v > 0.01f) {
-                val g = 7.dp.toPx()
-                drawRoundRect(fxBrush, topLeft = Offset(-g / 2, -g / 2), size = Size(size.width + g, size.height + g), cornerRadius = CornerRadius(corner.toPx() + g / 2), alpha = 0.22f * v, style = Stroke(g))
+                if (!Perf.low) {
+                    val g = 7.dp.toPx()
+                    drawRoundRect(fxBrush, topLeft = Offset(-g / 2, -g / 2), size = Size(size.width + g, size.height + g), cornerRadius = CornerRadius(corner.toPx() + g / 2), alpha = 0.22f * v, style = Stroke(g))
+                }
                 drawRoundRect(fxBrush, cornerRadius = r, alpha = v, style = Stroke(3.dp.toPx()))
             }
         }
         .onFocusChanged {
             val f = it.isFocused
-            scope.launch { p.animateTo(if (f) 1f else 0f, tween(if (f) 230 else 170, easing = FastOutSlowInEasing)) }
+            // Weak boxes: no animation, the state flips at once (no frames to compute while D-pad scrolling).
+            if (Perf.low) scope.launch { p.snapTo(if (f) 1f else 0f) }
+            else scope.launch { p.animateTo(if (f) 1f else 0f, tween(if (f) 200 else 140, easing = FastOutSlowInEasing)) }
             cb.value?.invoke(f)
         }
 }
 
-/** Keeps the focused poster at a fixed place in its row (one poster peeking before it) and glides there: a carousel instead of edge-snapping. */
+/** Scrolls a row only when the focused poster gets near an edge, by the minimum, with a short ease. Rows keep the same alignment, so Up/Down lands on the poster right above/below. */
 @OptIn(ExperimentalFoundationApi::class)
 private class AlignSpec(private val anchor: Float, private val ms: Int) : BringIntoViewSpec {
-    override val scrollAnimationSpec: AnimationSpec<Float> = tween(ms, easing = FastOutSlowInEasing)
-    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = offset - containerSize * anchor
+    override val scrollAnimationSpec: AnimationSpec<Float> get() = if (Perf.low) androidx.compose.animation.core.snap() else tween(ms, easing = FastOutSlowInEasing)
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+        val margin = containerSize * anchor
+        val lead = offset - margin
+        val trail = offset + size - (containerSize - margin)
+        return if (lead < 0f) lead else if (trail > 0f) trail else 0f
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
-private val rowSpec = AlignSpec(0.1f, 300)
+private val rowSpec = AlignSpec(0.04f, 220)
 @OptIn(ExperimentalFoundationApi::class)
 private val pageSpec = AlignSpec(0.2f, 380)
 

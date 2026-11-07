@@ -270,8 +270,12 @@ class MainActivity : ComponentActivity() {
         Lang.code = prefs.getString("lang", "fr") ?: "fr"
         Net.dns = prefs.getString("dns", DnsChoice.SYSTEM) ?: DnsChoice.SYSTEM
         // Images (Coil) and video (Media3) share the app's HTTP client, so DNS and VPN apply to them too.
-        coil.Coil.setImageLoader(coil.ImageLoader.Builder(applicationContext).okHttpClient(Net.client).crossfade(180).respectCacheHeaders(false)
-            .memoryCache { coil.memory.MemoryCache.Builder(applicationContext).maxSizePercent(0.22).build() }.build())
+        val am = getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        Perf.low = am.isLowRamDevice || mi.totalMem < 3_000_000_000L
+        coil.Coil.setImageLoader(coil.ImageLoader.Builder(applicationContext).okHttpClient(Net.client).respectCacheHeaders(false)
+            .crossfade(!Perf.low).allowRgb565(Perf.low)
+            .memoryCache { coil.memory.MemoryCache.Builder(applicationContext).maxSizePercent(if (Perf.low) 0.12 else 0.22).build() }.build())
         appScope.launch { vpn.startIfEnabled() }
         // Offer a newer release at every launch (dialog), like Zaal TV.
         appScope.launch { try { kotlinx.coroutines.delay(4_000); Updater.check(manual = false) } catch (e: Exception) { } }
@@ -608,10 +612,11 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
                     }
                     }
                     Spacer(Modifier.width(10.dp))
-                    val vpnSt by vpn.state.collectAsState()
-                    val vpnOn by vpn.enabled.collectAsState()
-                    NavVpn(vpnSt is VpnState.On, vpnOn && vpnSt !is VpnState.On && vpnSt !is VpnState.Failed) {
-                        if (vpnOn) { vpn.setEnabled(false); scope.launch { vpn.disconnect() } } else { vpn.setEnabled(true); startVpn() }
+                    // DNS shortcut: green when a filtering DNS (AdGuard by default) is active, grey on the system DNS. One press toggles.
+                    NavVpn("DNS", dnsChoice != DnsChoice.SYSTEM, false) {
+                        val key = if (dnsChoice != DnsChoice.SYSTEM) DnsChoice.SYSTEM else DnsChoice.ADGUARD
+                        dnsChoice = key; Net.dns = key; prefs.edit().putString("dns", key).apply()
+                        android.widget.Toast.makeText(context, if (key == DnsChoice.SYSTEM) "DNS : système" else "DNS : AdGuard", android.widget.Toast.LENGTH_SHORT).show()
                     }
                     Spacer(Modifier.width(4.dp))
                     NavigationItem("Quitter", Icons.Default.PowerSettingsNew, false, navSelected, null) { confirmQuit = true }
@@ -912,7 +917,7 @@ private fun NovaScreen(vpn: Vpn, startVpn: () -> Unit, appScope: kotlinx.corouti
 
 /** One-press VPN switch in the top bar: green key when connected, amber while connecting. */
 @Composable
-private fun NavVpn(on: Boolean, connecting: Boolean, onClick: () -> Unit) {
+private fun NavVpn(label: String, on: Boolean, connecting: Boolean, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(50.dp)
     Row(Modifier.scale(if (focused) 1.07f else 1f).clip(shape)
@@ -921,7 +926,7 @@ private fun NavVpn(on: Boolean, connecting: Boolean, onClick: () -> Unit) {
         .onFocusChanged { focused = it.isFocused }.clickable(onClick = onClick)
         .padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         // The word "VPN" itself shows the state: grey off, amber connecting, green connected.
-        Text("VPN", color = if (focused) Color.White else if (on) Color(0xFF34C759) else if (connecting) Color(0xFFFFB84D) else muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+        Text(label, color = if (focused) Color.White else if (on) Color(0xFF34C759) else if (connecting) Color(0xFFFFB84D) else muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
     }
 }
 
@@ -1347,13 +1352,16 @@ fun DiscoverShelf(title: String, items: List<TmdbItem>, onOpen: (TmdbItem) -> Un
     LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(start = 10.dp, end = 24.dp, top = 18.dp, bottom = 18.dp)) {
         items(items, key = { "${it.series}|${it.title}|${it.year}" }) { item ->
             var focused by remember { mutableStateOf(false) }
+            // Synopsis overlay only after the focus rests 300 ms: fast D-pad scrolling no longer lays out 11 lines of text per card.
+            var info by remember { mutableStateOf(false) }
+            LaunchedEffect(focused) { if (focused) { kotlinx.coroutines.delay(300); info = true } else info = false }
             Column(Modifier.width(130.dp)
                 .posterFocus(14.dp, 1.1f, panel, Color(0xFF33466E)) { focused = it }
                 .combinedClickable(onClick = { onOpen(item) }, onLongClick = { onFav(item) }).padding(8.dp)) {
                 Box(Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(10.dp))) {
                     AsyncImage(model = item.poster, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     if (favs.contains(item)) Icon(Icons.Default.Favorite, null, tint = accent, modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(20.dp))
-                    if (focused) Column(Modifier.fillMaxSize().background(Color(0xE6050810)).padding(8.dp)) {
+                    if (info) Column(Modifier.fillMaxSize().background(Color(0xE6050810)).padding(8.dp)) {
                         if (item.rating > 0) Text("★ %.1f".format(item.rating), color = Color(0xFFFFD66B), fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         if (item.year.isNotBlank()) Text(item.year, color = muted, fontSize = 10.sp)
                         Spacer(Modifier.height(4.dp))

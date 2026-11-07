@@ -50,7 +50,7 @@ object TmdbClient {
     }
 
     private fun item(o: JSONObject, series: Boolean): TmdbItem? {
-        val poster = img("w500", o.optString("poster_path"))
+        val poster = img("w342", o.optString("poster_path"))
         if (poster.isBlank()) return null
         return TmdbItem(o.optString(if (series) "name" else "title"), o.optString("overview"), o.optDouble("vote_average", 0.0),
             o.optString(if (series) "first_air_date" else "release_date").take(4), poster, img("w780", o.optString("backdrop_path")), series, o.optInt("id"))
