@@ -270,7 +270,8 @@ class MainActivity : ComponentActivity() {
         Lang.code = prefs.getString("lang", "fr") ?: "fr"
         Net.dns = prefs.getString("dns", DnsChoice.SYSTEM) ?: DnsChoice.SYSTEM
         // Images (Coil) and video (Media3) share the app's HTTP client, so DNS and VPN apply to them too.
-        coil.Coil.setImageLoader(coil.ImageLoader.Builder(applicationContext).okHttpClient(Net.client).build())
+        coil.Coil.setImageLoader(coil.ImageLoader.Builder(applicationContext).okHttpClient(Net.client).crossfade(180).respectCacheHeaders(false)
+            .memoryCache { coil.memory.MemoryCache.Builder(applicationContext).maxSizePercent(0.22).build() }.build())
         appScope.launch { vpn.startIfEnabled() }
         // Offer a newer release at every launch (dialog), like Zaal TV.
         appScope.launch { try { kotlinx.coroutines.delay(4_000); Updater.check(manual = false) } catch (e: Exception) { } }
@@ -977,13 +978,12 @@ private fun ChannelShelf(title: String, channels: List<Channel>, favorites: List
     val portrait = channels.first().type.let { it == "Films" || it == "Séries" }
     Text(uiLabel(title), color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
     Spacer(Modifier.height(12.dp))
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(start = 6.dp, end = 24.dp, top = 12.dp, bottom = 12.dp)) {
+    CarouselScroll {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(start = 6.dp, end = 24.dp, top = 16.dp, bottom = 16.dp)) {
         items(channels, key = { it.url }) { channel ->
-            var focused by remember { mutableStateOf(false) }
             val poster = rememberPoster(channel)
-            Column(Modifier.width(if (portrait) 130.dp else 215.dp).scale(if (focused) 1.06f else 1f)
-                .onFocusChanged { focused = it.isFocused }
-                .background(if (focused) Color(0xFF33466E) else panel, RoundedCornerShape(14.dp))
+            Column(Modifier.width(if (portrait) 130.dp else 215.dp)
+                .posterFocus(14.dp, 1.1f, panel, Color(0xFF33466E))
                 .clickable { onPlay(channel) }.padding(12.dp)) {
                 Box(Modifier.fillMaxWidth().height(if (portrait) 190.dp else 116.dp)
                     .background(Brush.linearGradient(listOf(Color(0xFF433A72), Color(0xFF204263))), RoundedCornerShape(10.dp)),
@@ -1012,7 +1012,8 @@ private fun ChannelShelf(title: String, channels: List<Channel>, favorites: List
             if (portrait) MoreCard(130.dp, 277.dp, 12.dp, 106.dp, 190.dp, onMore) else MoreCard(215.dp, 203.dp, 12.dp, 191.dp, 116.dp, onMore)
         }
     }
-    Spacer(Modifier.height(25.dp))
+    }
+    Spacer(Modifier.height(21.dp))
 }
 
 /** Search results as classic portrait posters, Films then Séries. */
@@ -1027,12 +1028,10 @@ private fun SearchResults(films: List<Channel>, series: List<Channel>, favorites
             items(list.chunked(cols), key = { row -> title + "|" + row.first().url }) { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.fillMaxWidth()) {
                     row.forEach { channel ->
-                        var focused by remember { mutableStateOf(false) }
                         val poster = rememberPoster(channel)
-                        Box(Modifier.weight(1f).aspectRatio(2f / 3f).scale(if (focused) 1.05f else 1f).clip(RoundedCornerShape(12.dp))
+                        Box(Modifier.weight(1f).aspectRatio(2f / 3f).posterFocus(12.dp, 1.07f).clip(RoundedCornerShape(12.dp))
                             .background(Brush.linearGradient(listOf(Color(0xFF433A72), Color(0xFF204263))))
-                            .border(if (focused) 3.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(12.dp))
-                            .onFocusChanged { focused = it.isFocused }.clickable { onPlay(channel) }) {
+                            .clickable { onPlay(channel) }) {
                             if (poster.startsWith("https://", true)) AsyncImage(model = poster, contentDescription = channel.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                             // Title on a dark fade at the bottom, like the posters of the Films and Séries pages.
                             Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6050810)))).padding(horizontal = 8.dp, vertical = 8.dp)) {
@@ -1055,11 +1054,9 @@ private fun ChannelGrid(channels: List<Channel>, favorites: List<String>, onPlay
       items(channels.chunked(3)) { row ->
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.fillMaxWidth()) {
             row.forEach { channel ->
-                var focused by remember { mutableStateOf(false) }
                 val poster = rememberPoster(channel)
-                Column(Modifier.weight(1f).scale(if (focused) 1.035f else 1f)
-                    .onFocusChanged { focused = it.isFocused }
-                    .background(if (focused) Color(0xFF30345B) else panel, RoundedCornerShape(14.dp))
+                Column(Modifier.weight(1f)
+                    .posterFocus(14.dp, 1.04f, panel, Color(0xFF30345B))
                     .clickable { onPlay(channel) }.padding(15.dp)) {
                     Box(Modifier.fillMaxWidth().height(86.dp).background(Brush.linearGradient(listOf(Color(0xFF314C83), Color(0xFF202A42))), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
                         if (poster.startsWith("https://", true)) AsyncImage(model = poster, contentDescription = channel.name, contentScale = if (channel.type == "TV en direct" || channel.type.isBlank()) ContentScale.Fit else ContentScale.Crop, modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)))
@@ -1346,11 +1343,12 @@ fun DiscoverShelf(title: String, items: List<TmdbItem>, onOpen: (TmdbItem) -> Un
         Text(uiLabel(title), color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
     }
     Spacer(Modifier.height(12.dp))
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(start = 10.dp, end = 24.dp, top = 14.dp, bottom = 14.dp)) {
+    CarouselScroll {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(start = 10.dp, end = 24.dp, top = 18.dp, bottom = 18.dp)) {
         items(items, key = { "${it.series}|${it.title}|${it.year}" }) { item ->
             var focused by remember { mutableStateOf(false) }
-            Column(Modifier.width(130.dp).scale(if (focused) 1.08f else 1f).onFocusChanged { focused = it.isFocused }
-                .background(if (focused) Color(0xFF33466E) else panel, RoundedCornerShape(14.dp))
+            Column(Modifier.width(130.dp)
+                .posterFocus(14.dp, 1.1f, panel, Color(0xFF33466E)) { focused = it }
                 .combinedClickable(onClick = { onOpen(item) }, onLongClick = { onFav(item) }).padding(8.dp)) {
                 Box(Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(10.dp))) {
                     AsyncImage(model = item.poster, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
@@ -1369,7 +1367,8 @@ fun DiscoverShelf(title: String, items: List<TmdbItem>, onOpen: (TmdbItem) -> Un
         }
         if (onMore != null) item(key = "voir-plus") { MoreCard(130.dp, 244.dp, 8.dp, 114.dp, 190.dp, onMore) }
     }
-    Spacer(Modifier.height(25.dp))
+    }
+    Spacer(Modifier.height(21.dp))
 }
 
 @OptIn(ExperimentalComposeUiApi::class)
